@@ -37,7 +37,7 @@ Check out my example function:
 func fooBar() {
     fmt.Println("Cool!")
 }
-```
+\`\`\`
 <!-- /pullquote -->
 
 Neat, huh?
