@@ -13,6 +13,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"unicode"
 )
 
@@ -155,16 +157,26 @@ func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writ
 			}
 
 		case i == pqs[0].endIdx:
-			if pqs[0].codeFenceEnabled {
-				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(pqs[0].codeFenceLang)...)); err != nil {
+			switch pqs[0].fmt {
+			case "codefence":
+				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(pqs[0].lang)...)); err != nil {
 					return err
 				}
-			}
-			if err := writeWithNewLine([]byte(expanded[0])); err != nil {
-				return err
-			}
-			if pqs[0].codeFenceEnabled {
+				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
+					return err
+				}
 				if err := writeWithNewLine([]byte{'`', '`', '`'}); err != nil {
+					return err
+				}
+			case "blockquote":
+				if _, err := w.Write([]byte{'>', ' '}); err != nil {
+					return err
+				}
+				if err := writeWithNewLine([]byte(strings.Replace(expanded[0], "\n", "\n> ", -1))); err != nil {
+					return err
+				}
+			default:
+				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
 					return err
 				}
 			}
@@ -260,12 +272,17 @@ func expandGroupedPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
 	type state struct {
 		*pullQuote
 		*bytes.Buffer
-		result string
+		result            string
+		endMatchRemaining int
 	}
 
 	states := make([]*state, 0, len(pqs))
 	for _, pq := range pqs {
-		states = append(states, &state{pq, nil, ""})
+		endCountRem := 1
+		if pq.endCount != 0 {
+			endCountRem = pq.endCount
+		}
+		states = append(states, &state{pq, nil, "", endCountRem})
 	}
 
 	{
@@ -284,9 +301,12 @@ func expandGroupedPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
 				}
 				s.Buffer.WriteString(txt)
 				if s.end.MatchString(txt) {
-					s.result = s.Buffer.String()
-					s.Buffer = nil
-					continue
+					s.endMatchRemaining--
+					if s.endMatchRemaining == 0 {
+						s.result = s.Buffer.String()
+						s.Buffer = nil
+						continue
+					}
 				}
 				s.Buffer.WriteByte('\n')
 			}
@@ -394,9 +414,15 @@ func parseLine(line string) (*pullQuote, error) {
 				if pat.end, err = regexp.Compile(val); err != nil {
 					return nil, fmt.Errorf("invalid end %q: %w", val, err)
 				}
-			case "codefence":
-				pat.codeFenceLang = val
-				pat.codeFenceEnabled = true
+			case "endcount":
+				var err error
+				if pat.endCount, err = strconv.Atoi(val); err != nil {
+					return nil, fmt.Errorf("invalid endcount %q: %w", val, err)
+				}
+			case "fmt":
+				pat.fmt = val
+			case "lang":
+				pat.lang = val
 			default:
 				return nil, fmt.Errorf("unknown key %q with value %q", key, val)
 			}
@@ -430,15 +456,18 @@ func validate(pq *pullQuote) error {
 		return errors.New("start cannot be unset")
 	case pq.end == nil:
 		return errors.New("end cannot be unset")
+	case pq.fmt != "" && pq.fmt != "codefence" && pq.fmt != "blockquote":
+		return errors.New("must be codefence or blockquote")
 	default:
 		return nil
 	}
 }
 
 type pullQuote struct {
-	src              string
-	start, end       *regexp.Regexp
+	src        string
+	start, end *regexp.Regexp
+	endCount   int
+	fmt, lang  string
+
 	startIdx, endIdx int
-	codeFenceLang    string
-	codeFenceEnabled bool
 }

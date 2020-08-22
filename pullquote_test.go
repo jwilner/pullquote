@@ -25,13 +25,13 @@ func Test_run(t *testing.T) {
 		errS     string
 	}{
 		{
-			"inserts",
+			"inserts blockquote",
 			[][2]string{
 				{
 					"my/path.go",
 					`
 hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" codefence=go -->
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
 <!-- /pullquote -->
 bye
 `,
@@ -49,12 +49,82 @@ func fooBar() {
 			[]string{
 				`
 hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" codefence=go -->
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
+func fooBar() {
+	// OK COOL
+}
+<!-- /pullquote -->
+bye
+`,
+			},
+			"",
+		},
+		{
+			"inserts blockquote",
+			[][2]string{
+				{
+					"my/path.go",
+					`
+hello
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=codefence lang=go -->
+<!-- /pullquote -->
+bye
+`,
+				},
+				{
+					"my/local.go",
+					`
+func fooBar() {
+	// OK COOL
+}
+`,
+				},
+			},
+			[]string{"my/path.go"},
+			[]string{
+				`
+hello
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=codefence lang=go -->
 ` + "```go" + `
 func fooBar() {
 	// OK COOL
 }
 ` + "```" + `
+<!-- /pullquote -->
+bye
+`,
+			},
+			"",
+		},
+		{
+			"pullquote",
+			[][2]string{
+				{
+					"my/path.go",
+					`
+hello
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=blockquote -->
+<!-- /pullquote -->
+bye
+`,
+				},
+				{
+					"my/local.go",
+					`
+func fooBar() {
+	// OK COOL
+}
+`,
+				},
+			},
+			[]string{"my/path.go"},
+			[]string{
+				`
+hello
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=blockquote -->
+> func fooBar() {
+> 	// OK COOL
+> }
 <!-- /pullquote -->
 bye
 `,
@@ -214,8 +284,8 @@ func Test_parseLine(t *testing.T) {
 		},
 		{
 			"no quotes",
-			`<!-- pullquote src=here.go start=hi end=bye -->`,
-			&pullQuote{src: `here.go`, start: reg("hi"), end: reg("bye")},
+			`<!-- pullquote src=here.go start=hi end=bye fmt=codefence -->`,
+			&pullQuote{src: `here.go`, start: reg("hi"), end: reg("bye"), fmt: "codefence"},
 			"",
 		},
 		{
@@ -374,6 +444,25 @@ func fooBar() {
 				{src: "local.go", start: reg(`func fooBar\(\) {`), end: reg(`}`)},
 			},
 			[]string{"func fooBar() {\n\t// OK COOL\n}"},
+			"",
+		},
+		{
+			"endCount",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`
+func fooBar() {
+	// OK COOL
+}
+
+func fooBaz() {
+	// ok
+}
+`}},
+			[]*pullQuote{
+				{src: "local.go", start: reg(`func fooBar\(\) {`), end: reg(`}`), endCount: 2},
+			},
+			[]string{"func fooBar() {\n\t// OK COOL\n}\n\nfunc fooBaz() {\n\t// ok\n}"},
 			"",
 		},
 		{
@@ -550,7 +639,7 @@ func compareRegexps(t *testing.T, expected, got *regexp.Regexp) {
 func compareLines(t *testing.T, expected, got string) {
 	eL, gL := strings.Split(expected, "\n"), strings.Split(got, "\n")
 	if len(eL) != len(gL) {
-		t.Fatalf("Expected %d lines but got %d", len(eL), len(gL))
+		t.Fatalf("Expected %d lines but got %d: %q", len(eL), len(gL), got)
 	}
 	for i := range eL {
 		if eL[i] != gL[i] {

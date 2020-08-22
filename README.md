@@ -16,7 +16,7 @@ func fooBar() {
 ```md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} codefence=go -->
+<!-- pullquote src=file.go start="// fooBar" end=^} fmt=codefence lang=go -->
 <!-- /pullquote -->
 
 Neat, huh?
@@ -31,7 +31,7 @@ pullquote doc.md
 ~~~md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} codefence=go -->
+<!-- pullquote src=file.go start="// fooBar" end=^} fmt=codefence lang=go -->
 ```go
 // fooBar is a very fine func
 func fooBar() {
@@ -44,3 +44,30 @@ Neat, huh?
 ~~~
 
 That's it.
+
+## Options:
+
+- `src` (required)
+
+    Specifies the file from which to pull the quote.
+
+
+- `start` (required)
+
+    A pattern or substring specifying the line on which to begin. Matches the first occurrence of the pattern.
+
+- `end` (required)
+
+    A pattern or substring specifying the line on which to end. Matches the first occurrence of the pattern after the start, or, if `endcount` is specified, the nth occurrence.
+
+- `fmt`
+    - `codefence` markdown code fence formatting, optionally with a language if `lang` specified
+    - `blockquote` markdown block quote formatting
+
+- `endcount`
+
+    Specifies the number of times to match the end pattern before closing the pull quote.
+
+- `lang`
+
+    Specifies the language, if any, with which to highlight the `codefence`.
