@@ -16,7 +16,7 @@ func fooBar() {
 ```md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} -->
+<!-- pullquote src=file.go start="// fooBar" end=^} codefence=go -->
 <!-- /pullquote -->
 
 Neat, huh?
@@ -31,11 +31,13 @@ pullquote doc.md
 ```md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} -->
+<!-- pullquote src=file.go start="// fooBar" end=^} codefence=go -->
+```go
 // fooBar is a very fine func
 func fooBar() {
     fmt.Println("Cool!")
 }
+```
 <!-- /pullquote -->
 
 Neat, huh?

@@ -31,7 +31,7 @@ func Test_run(t *testing.T) {
 					"my/path.go",
 					`
 hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" codefence=go -->
 <!-- /pullquote -->
 bye
 `,
@@ -49,10 +49,12 @@ func fooBar() {
 			[]string{
 				`
 hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
+<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" codefence=go -->
+` + "```go" + `
 func fooBar() {
 	// OK COOL
 }
+` + "```" + `
 <!-- /pullquote -->
 bye
 `,
@@ -79,9 +81,7 @@ bye
 				if err != nil {
 					t.Fatalf("failed reading %d %v: %v", i, fn, err)
 				}
-				if s := string(b); s != c.expected[i] {
-					t.Fatalf("wanted %q but got %q", c.expected[i], s)
-				}
+				compareLines(t, c.expected[i], string(b))
 			}
 		})
 	}
@@ -544,5 +544,17 @@ func compareRegexps(t *testing.T, expected, got *regexp.Regexp) {
 	}
 	if expS != gotS {
 		t.Fatalf("wanted %q but got %q", expS, gotS)
+	}
+}
+
+func compareLines(t *testing.T, expected, got string) {
+	eL, gL := strings.Split(expected, "\n"), strings.Split(got, "\n")
+	if len(eL) != len(gL) {
+		t.Fatalf("Expected %d lines but got %d", len(eL), len(gL))
+	}
+	for i := range eL {
+		if eL[i] != gL[i] {
+			t.Fatalf("Expected at line %d %q but got %q", i, eL[i], gL[i])
+		}
 	}
 }

@@ -155,8 +155,18 @@ func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writ
 			}
 
 		case i == pqs[0].endIdx:
+			if pqs[0].codeFenceEnabled {
+				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(pqs[0].codeFenceLang)...)); err != nil {
+					return err
+				}
+			}
 			if err := writeWithNewLine([]byte(expanded[0])); err != nil {
 				return err
+			}
+			if pqs[0].codeFenceEnabled {
+				if err := writeWithNewLine([]byte{'`', '`', '`'}); err != nil {
+					return err
+				}
 			}
 			if err := writeWithNewLine(scanner.Bytes()); err != nil {
 				return err
@@ -306,7 +316,7 @@ var (
 	regexpWrapperEnd = regexp.MustCompile(`^\s*<!--\s*/pullquote\s*-->\s*$`)
 )
 
-func /**/ parseLine(line string) (*pullQuote, error) {
+func parseLine(line string) (*pullQuote, error) {
 	groups := regexpWrapper.FindStringSubmatch(line)
 	if len(groups) != 2 {
 		return nil, nil
@@ -384,6 +394,9 @@ func /**/ parseLine(line string) (*pullQuote, error) {
 				if pat.end, err = regexp.Compile(val); err != nil {
 					return nil, fmt.Errorf("invalid end %q: %w", val, err)
 				}
+			case "codefence":
+				pat.codeFenceLang = val
+				pat.codeFenceEnabled = true
 			default:
 				return nil, fmt.Errorf("unknown key %q with value %q", key, val)
 			}
@@ -426,4 +439,6 @@ type pullQuote struct {
 	src              string
 	start, end       *regexp.Regexp
 	startIdx, endIdx int
+	codeFenceLang    string
+	codeFenceEnabled bool
 }
