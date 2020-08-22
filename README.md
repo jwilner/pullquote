@@ -28,7 +28,7 @@ pullquote doc.md
 ```
 
 - `pullquote` adds the snippet between the quotes.
-```md
+~~~md
 Check out my example function:
 
 <!-- pullquote src=file.go start="// fooBar" end=^} codefence=go -->
@@ -37,10 +37,10 @@ Check out my example function:
 func fooBar() {
     fmt.Println("Cool!")
 }
-\`\`\`
+```
 <!-- /pullquote -->
 
 Neat, huh?
-```
+~~~
 
 That's it.
