@@ -1,3 +1,5 @@
+[![Tests](https://github.com/jwilner/pullquote/workflows/)](https://github.com/jwilner/pullquote/workflows/tests/badge.svg)
+
 # pullquote
 
 A simple documentation tool that keeps quotes or snippets in your docs up-to-date. Intended to be wired into CI so you never have to update your snippets again.
