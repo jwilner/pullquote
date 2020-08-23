@@ -1,4 +1,4 @@
-[![Tests](https://github.com/jwilner/pullquote/workflows/)](https://github.com/jwilner/pullquote/workflows/tests/badge.svg)
+[![Tests](https://github.com/jwilner/pullquote/workflows/tests/badge.svg)](https://github.com/jwilner/pullquote/workflows/)
 
 # pullquote
 
