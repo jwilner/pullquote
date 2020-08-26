@@ -16,12 +16,12 @@ func fooBar() {
 
 - Insert a `pullquote` tag in your doc:
 ```md
-Check out my example function:
+Lorem ipsum lorem ipsum.
 
 <!-- pullquote gopath=.#fooBar -->
 <!-- /pullquote -->
 
-Neat, huh?
+Lorem ipsum lorem ipsum.
 ```
 
 - Run `pullquote` on  the doc
@@ -31,7 +31,7 @@ pullquote doc.md
 
 - `pullquote` adds the snippet between the quotes.
 ~~~md
-Check out my example function:
+Lorem ipsum lorem ipsum.
 
 <!-- pullquote gopath=.#fooBar -->
 ```go
@@ -42,7 +42,7 @@ func fooBar() {
 ```
 <!-- /pullquote -->
 
-Neat, huh?
+Lorem ipsum lorem ipsum.
 ~~~
 
 That's it.
