@@ -18,7 +18,7 @@ func fooBar() {
 ```md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} fmt=codefence lang=go -->
+<!-- pullquote gopath=.#fooBar -->
 <!-- /pullquote -->
 
 Neat, huh?
@@ -33,7 +33,7 @@ pullquote doc.md
 ~~~md
 Check out my example function:
 
-<!-- pullquote src=file.go start="// fooBar" end=^} fmt=codefence lang=go -->
+<!-- pullquote gopath=.#fooBar -->
 ```go
 // fooBar is a very fine func
 func fooBar() {
@@ -48,6 +48,16 @@ Neat, huh?
 That's it.
 
 ## Options:
+
+There are two mutually exclusive groups of pullquote options:
+
+`gopath` group:
+
+- `gopath` (required)
+
+    The path to a package or file and a symbol within in the format `PATH_TO_PACKAGE_OR_FILE#SYMBOL`. Non-local packages are supported; e.g. `errors#New`.
+
+`src` group:
 
 - `src` (required)
 

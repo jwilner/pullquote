@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,152 +16,73 @@ import (
 var reg = regexp.MustCompile
 
 func Test_run(t *testing.T) {
-	d := changeTmpDir(t)
-	defer d.Close()
+	entries, err := ioutil.ReadDir("testdata/test_run")
+	if err != nil {
+		t.Skipf("testdata/test_run not usable: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dataDir, err := filepath.Abs(filepath.Join("testdata/test_run", e.Name()))
+		if err != nil {
+			t.Fatalf("abs: %v", err)
+		}
+		t.Run(e.Name(), func(t *testing.T) {
+			tDir := changeTmpDir(t)
+			defer tDir.Close()
 
-	for _, c := range []struct {
-		name     string
-		files    [][2]string
-		fns      []string
-		expected []string
-		errS     string
-	}{
-		{
-			"inserts blockquote",
-			[][2]string{
-				{
-					"my/path.go",
-					`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
-<!-- /pullquote -->
-bye
-`,
-				},
-				{
-					"my/local.go",
-					`
-func fooBar() {
-	// OK COOL
-}
-`,
-				},
-			},
-			[]string{"my/path.go"},
-			[]string{
-				`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" -->
-func fooBar() {
-	// OK COOL
-}
-<!-- /pullquote -->
-bye
-`,
-			},
-			"",
-		},
-		{
-			"inserts blockquote",
-			[][2]string{
-				{
-					"my/path.go",
-					`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=codefence lang=go -->
-<!-- /pullquote -->
-bye
-`,
-				},
-				{
-					"my/local.go",
-					`
-func fooBar() {
-	// OK COOL
-}
-`,
-				},
-			},
-			[]string{"my/path.go"},
-			[]string{
-				`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=codefence lang=go -->
-` + "```go" + `
-func fooBar() {
-	// OK COOL
-}
-` + "```" + `
-<!-- /pullquote -->
-bye
-`,
-			},
-			"",
-		},
-		{
-			"pullquote",
-			[][2]string{
-				{
-					"my/path.go",
-					`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=blockquote -->
-<!-- /pullquote -->
-bye
-`,
-				},
-				{
-					"my/local.go",
-					`
-func fooBar() {
-	// OK COOL
-}
-`,
-				},
-			},
-			[]string{"my/path.go"},
-			[]string{
-				`
-hello
-<!-- pullquote src=local.go start="func fooBar\\(\\) {" end="}" fmt=blockquote -->
-> func fooBar() {
-> 	// OK COOL
-> }
-<!-- /pullquote -->
-bye
-`,
-			},
-			"",
-		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			for _, f := range c.files {
-				writeFile(t, f[0], f[1])
-			}
-			var errS string
-			if err := run(context.Background(), c.fns); err != nil {
-				errS = err.Error()
-			}
-			if errS != c.errS {
-				t.Fatalf("Expected %q but got %q", c.errS, errS)
-			} else if errS != "" {
-				return
-			}
-
-			for i, fn := range c.fns {
-				b, err := ioutil.ReadFile(fn)
-				if err != nil {
-					t.Fatalf("failed reading %d %v: %v", i, fn, err)
+			var (
+				inFiles, expectedFiles []string
+				golden                 bool
+			)
+			if err := filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+				switch {
+				case err != nil, info.IsDir():
+					return err
+				case info.Name() == "GOLDEN":
+					golden = true
+					return nil
+				case strings.HasSuffix(path, ".expected.md"):
+					expectedFiles = append(expectedFiles, path)
+					inFiles = append(inFiles, strings.Replace(path[len(dataDir)+1:], ".expected", "", -1))
+					return nil
+				default:
+					rel := path[len(dataDir)+1:]
+					return copyFile(path, rel)
 				}
-				compareLines(t, c.expected[i], string(b))
+			}); err != nil {
+				t.Fatalf("unable to copy: %v", err)
+			}
+
+			if err := run(context.Background(), inFiles); err != nil {
+				t.Fatal(err)
+			}
+
+			for i := 0; i < len(expectedFiles); i++ {
+				expected, err := ioutil.ReadFile(expectedFiles[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				in, err := ioutil.ReadFile(inFiles[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(expected, in) {
+					if golden {
+						if err := ioutil.WriteFile(expectedFiles[i], in, 0o644); err != nil {
+							t.Fatal(err)
+						}
+						return
+					}
+					t.Fatalf("outputs did not match\nwanted:\n\n%v\n\ngot:\n\n%v", string(expected), string(in))
+				}
 			}
 		})
 	}
 }
 
 func Test_processFile(t *testing.T) {
-	d := changeTmpDir(t)
-	defer d.Close()
 
 	for _, c := range []struct {
 		name                 string
@@ -199,8 +122,47 @@ bye
 `,
 			"",
 		},
+		{
+			"gopath",
+			[][2]string{
+				{
+					"my/README.md",
+					`
+hello
+<!-- pullquote gopath=./#fooBar -->
+<!-- /pullquote -->
+bye
+`,
+				},
+				{
+					"my/local.go",
+					`package main
+
+func fooBar() {
+	// OK COOL
+}
+`,
+				},
+			},
+			"my/README.md",
+			`
+hello
+<!-- pullquote gopath=./#fooBar -->
+` + "```" + `go
+func fooBar() {
+	// OK COOL
+}
+` + "```" + `
+<!-- /pullquote -->
+bye
+`,
+			"",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			d := changeTmpDir(t)
+			defer d.Close()
+
 			for _, f := range c.files {
 				writeFile(t, f[0], f[1])
 			}
@@ -421,8 +383,6 @@ func Test_readPatterns(t *testing.T) {
 }
 
 func Test_expandPullQuotes(t *testing.T) {
-	d := changeTmpDir(t)
-	defer d.Close()
 
 	for _, c := range []struct {
 		name, fn string
@@ -540,12 +500,192 @@ func fooBaz() {
 			},
 			"",
 		},
+		{
+			"func with doc comment",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+// doc comment
+func fooBar() {
+	// OK COOL
+	fmt.Println("nice")
+}
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#fooBar"},
+			},
+			[]string{"// doc comment\nfunc fooBar() {\n\t// OK COOL\n\tfmt.Println(\"nice\")\n}"},
+			"",
+		},
+		{
+			"type decl",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+type (
+	// Foo does some stuff
+	// and other stuff
+	Foo struct {
+		// floating inline
+		A int // trailing inline
+		// Also this
+	}
+	// Bar does some other stuff
+	Bar struct {
+		B int
+	}
+)
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#Foo"},
+			},
+
+			[]string{
+				`// Foo does some stuff
+// and other stuff
+Foo struct {
+	// floating inline
+	A int // trailing inline
+	// Also this
+}`,
+			},
+			"",
+		},
+		{
+			"const decl",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+const (
+	// Foo does some important things
+	Foo = iota
+	Bar
+)
+
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#Foo"},
+			},
+			[]string{
+				`// Foo does some important things
+Foo = iota`,
+			},
+			"",
+		},
+		{
+			"const decl include groups",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+// a bunch of great stuff
+const (
+	// Foo does some important things
+	Foo = iota
+	Bar
+)
+
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#Foo", goPrintFlags: includeGroup},
+			},
+			[]string{
+				`// a bunch of great stuff
+const (
+	// Foo does some important things
+	Foo = iota
+	Bar
+)`,
+			},
+			"",
+		},
+		{
+			"third party",
+			"my/path.go",
+			[][2]string{},
+			[]*pullQuote{
+				{goPath: "errors#New"},
+			},
+			[]string{"// New returns an error that formats as the given text.\n// Each call to New returns a distinct error value even if the text is identical.\nfunc New(text string) error {\n\treturn &errorString{text}\n}"},
+			"",
+		},
+		{
+			"random var",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+// doc comment
+func fooBar() {
+	// OK COOL
+	a := 23
+	fmt.Println(a)
+}
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#a"},
+			},
+			[]string{"a := 23"},
+			"",
+		},
+		{
+			"zero var",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+// blah means nothing
+var blah int
+`}},
+			[]*pullQuote{
+				{goPath: "local.go#blah"},
+			},
+			[]string{
+				`// blah means nothing
+var blah int`,
+			},
+			"",
+		},
+		{
+			"inline const",
+			"my/path.go",
+			[][2]string{{"my/local.go",
+				`package main
+
+func fooBar() {
+	// const blah
+	const a int = 23
+}
+`}},
+			[]*pullQuote{
+				{goPath: "./#a"},
+			},
+			[]string{
+				`// const blah
+const a int = 23`,
+			},
+			"",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			d := changeTmpDir(t)
+			defer d.Close()
+
 			for _, f := range c.files {
 				writeFile(t, f[0], f[1])
 			}
-			res, err := expandPullQuotes(c.fn, c.pqs)
+			for _, pq := range c.pqs {
+				if pq.src != "" {
+					pq.src = filepath.Join(filepath.Dir(c.fn), pq.src)
+				}
+				if pq.goPath != "" && strings.HasPrefix(pq.goPath, "./") || strings.Contains(pq.goPath, ".go") {
+					pq.goPath = filepath.Join(filepath.Dir(c.fn), pq.goPath)
+				}
+			}
+			res, err := expandPullQuotes(context.Background(), c.pqs)
 			var errS string
 			if err != nil {
 				errS = err.Error()
@@ -596,7 +736,7 @@ func (t *testDir) Close() {
 }
 
 func changeTmpDir(t *testing.T) *testDir {
-	tmpDir, err := ioutil.TempDir("", t.Name())
+	tmpDir, err := ioutil.TempDir("", strings.Replace(t.Name(), "/", "_", -1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,4 +786,29 @@ func compareLines(t *testing.T, expected, got string) {
 			t.Fatalf("Expected at line %d %q but got %q", i, eL[i], gL[i])
 		}
 	}
+}
+
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	g, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = g.Close()
+	}()
+
+	_, err = io.Copy(g, f)
+	return err
 }

@@ -83,6 +83,9 @@ func run(ctx context.Context, fns []string) error {
 			errFn = res.fn
 			continue
 		}
+		if res.tempFn == "" {
+			continue
+		}
 		moves = append(moves, [2]string{res.tempFn, res.fn})
 	}
 	if err != nil {
@@ -93,7 +96,7 @@ func run(ctx context.Context, fns []string) error {
 	}
 	for _, m := range moves {
 		if err := os.Rename(m[0], m[1]); err != nil {
-			return err
+			return fmt.Errorf("os.Rename(%v, %v): %w", m[0], m[1], err)
 		}
 	}
 	return nil
@@ -118,7 +121,17 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 		return "", nil
 	}
 
-	expanded, err := expandPullQuotes(fn, pqs)
+	dir := filepath.Dir(fn)
+	for _, pq := range pqs {
+		if pq.src != "" {
+			pq.src = filepath.Join(dir, pq.src)
+		}
+		if pq.goPath != "" && (strings.HasPrefix(pq.goPath, "./") || strings.Contains(pq.goPath, ".go")) {
+			pq.goPath = filepath.Join(dir, pq.goPath)
+		}
+	}
+
+	expanded, err := expandPullQuotes(ctx, pqs)
 	if err != nil {
 		return "", fmt.Errorf("expandedPullQuotes: %w", err)
 	}
@@ -157,9 +170,17 @@ func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writ
 			}
 
 		case i == pqs[0].endIdx:
-			switch pqs[0].fmt {
+
+			format := pqs[0].fmt
+			lang := pqs[0].lang
+			if pqs[0].goPath != "" && format == "" && lang == "" {
+				format = "codefence"
+				lang = "go"
+			}
+
+			switch format {
 			case "codefence":
-				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(pqs[0].lang)...)); err != nil {
+				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(lang)...)); err != nil {
 					return err
 				}
 				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
@@ -227,10 +248,31 @@ func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 	return patterns, nil
 }
 
-func expandPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
+func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 	results := make([]string, len(pqs))
 
 	var buf []*pullQuote
+
+	// handle go quotes first
+	for _, pq := range pqs {
+		if pq.goPath != "" {
+			buf = append(buf, pq)
+		}
+	}
+	if len(buf) > 0 {
+		expanded, err := expandGoQuotes(ctx, buf)
+		if err != nil {
+			return nil, err
+		}
+		for j, cur := 0, 0; j < len(pqs); j++ {
+			if pqs[j].goPath == buf[cur].goPath {
+				results[j] = expanded[cur]
+				cur++
+			}
+		}
+		buf = buf[:0]
+	}
+
 	for i, pq := range pqs {
 		if results[i] != "" {
 			continue
@@ -242,7 +284,7 @@ func expandPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
 			}
 		}
 
-		found, err := expandGroupedPullQuotes(fn, buf)
+		found, err := expandSrcPullQuotes(buf)
 		if err != nil {
 			return nil, err
 		}
@@ -260,8 +302,8 @@ func expandPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
 	return results, nil
 }
 
-func expandGroupedPullQuotes(fn string, pqs []*pullQuote) ([]string, error) {
-	f, err := os.Open(filepath.Join(filepath.Dir(fn), pqs[0].src))
+func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
+	f, err := os.Open(pqs[0].src)
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +465,8 @@ func parseLine(line string) (*pullQuote, error) {
 				pat.fmt = val
 			case "lang":
 				pat.lang = val
+			case "gopath":
+				pat.goPath = val
 			default:
 				return nil, fmt.Errorf("unknown key %q with value %q", key, val)
 			}
@@ -449,6 +493,10 @@ func parseLine(line string) (*pullQuote, error) {
 }
 
 func validate(pq *pullQuote) error {
+	if pq.goPath != "" {
+		return nil
+	}
+
 	switch {
 	case pq.src == "":
 		return errors.New("src cannot be unset")
@@ -469,5 +517,16 @@ type pullQuote struct {
 	endCount   int
 	fmt, lang  string
 
+	goPath       string
+	goPrintFlags goPrintFlag
+
 	startIdx, endIdx int
 }
+
+type goPrintFlag uint
+
+const (
+	_ goPrintFlag = 1 << iota
+	noRealignTabs
+	includeGroup
+)
