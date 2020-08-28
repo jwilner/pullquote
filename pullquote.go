@@ -19,9 +19,30 @@ import (
 )
 
 func main() {
-	ctx, cncl := context.WithCancel(context.Background())
-	defer cncl()
+	fns := make([]string, 0, len(os.Args)-1)
+	copy(fns, os.Args[1:])
 
+	// add in stdin if present
+	if stat, _ := os.Stdin.Stat(); stat != nil && stat.Mode()&os.ModeCharDevice == 0 {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			fns = append(fns, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	ctx, cncl := signalCtx()
+	defer cncl()
+	if err := run(ctx, fns); err != nil {
+		cncl()
+		log.Fatal(err)
+	}
+}
+
+func signalCtx() (context.Context, context.CancelFunc) {
+	ctx, cncl := context.WithCancel(context.Background())
 	{
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, os.Interrupt)
@@ -33,10 +54,7 @@ func main() {
 			}
 		}()
 	}
-
-	if err := run(ctx, os.Args[1:]); err != nil {
-		log.Fatal(err)
-	}
+	return ctx, cncl
 }
 
 func run(ctx context.Context, fns []string) error {
