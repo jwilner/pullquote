@@ -370,8 +370,8 @@ func Test_readPatterns(t *testing.T) {
 			`
 <!-- pullquote src=here.go start=hi end=bye -->
 `,
-			nil,
-			"unfinished pullquote begun on line 2",
+			[]*pullQuote{{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")}},
+			"",
 		},
 		{
 			"missing end",

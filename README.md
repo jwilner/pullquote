@@ -21,7 +21,6 @@ func fooBar() {
 ```md
 hello
 <!-- goquote .#fooBar -->
-<!-- /goquote -->
 bye
 ```
 <!-- /pullquote -->
@@ -31,7 +30,7 @@ bye
 pullquote doc.md
 ```
 
-- `pullquote` adds the snippet between the quotes.
+- `pullquote` adds in the snippet styled the way you expect.
 <!-- pullquote src=testdata/test_run/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
 ~~~md
 hello

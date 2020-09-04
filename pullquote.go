@@ -209,23 +209,25 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.W
 		}
 
 		switch {
-		case pq == nil || i <= pq.startIdx:
+		case pq == nil || i < pq.startIdx:
 			applier.writeWithNewLine(scanner.Bytes())
 
-		case i == pq.endIdx:
+		case i == pq.startIdx:
+			applier.writeWithNewLine(scanner.Bytes())
+
 			exp := expanded[0]
 
 			switch pq.fmt {
 			case fmtExample:
-				if len(exp.Parts) == 2 {
-					applier.writeWithNewLine([]byte("Code:"))
-					applier.writeCodeFence([]byte(exp.Parts[0]), pq.lang)
-					applier.writeWithNewLine([]byte("Output:"))
-					applier.writeCodeFence([]byte(exp.Parts[1]), "")
+				if len(exp.Parts) != 2 {
+					// we couldn't parse the example -- treat it like a standard codefence
+					applier.writeCodeFence([]byte(exp.String), pq.lang)
 					break
 				}
-				// we couldn't parse the example -- treat it like a standard codefence
-				applier.writeCodeFence([]byte(exp.String), pq.lang)
+				applier.writeWithNewLine([]byte("Code:"))
+				applier.writeCodeFence([]byte(exp.Parts[0]), pq.lang)
+				applier.writeWithNewLine([]byte("Output:"))
+				applier.writeCodeFence([]byte(exp.Parts[1]), "")
 			case fmtCodeFence:
 				applier.writeCodeFence([]byte(exp.String), pq.lang)
 			case fmtBlockQuote:
@@ -234,6 +236,16 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.W
 			default: // include fmtNone
 				applier.writeWithNewLine([]byte(exp.String))
 			}
+
+			if pq.endIdx == idxNoEnd {
+				// add in the end tag
+				applier.writeWithNewLine([]byte(fmt.Sprintf("<!-- /%vquote -->", pq.tagType)))
+
+				pqs = pqs[1:]
+				expanded = expanded[1:]
+			}
+
+		case i == pq.endIdx:
 			applier.writeWithNewLine(scanner.Bytes())
 
 			pqs = pqs[1:]
@@ -245,6 +257,8 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.W
 	}
 	return scanner.Err()
 }
+
+const idxNoEnd = -1
 
 func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 	var (
@@ -278,23 +292,30 @@ func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 				current.endIdx = i
 				patterns = append(patterns, current)
 				current = nil
+				continue
 			}
-			continue
 		}
 
-		var err error
-		if current, err = parseLine(line); err != nil {
+		next, err := parseLine(line)
+		if err != nil {
 			return nil, fmt.Errorf("parsing line %v: %w", i+1, err)
 		}
-		if current != nil {
-			current.startIdx = i
+		if next == nil {
+			continue
 		}
+		next.startIdx = i
+		if current != nil {
+			current.endIdx = idxNoEnd
+			patterns = append(patterns, current)
+		}
+		current = next
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning failed after %v lines(s): %w", i+1, err)
 	}
 	if current != nil {
-		return nil, fmt.Errorf("unfinished pullquote begun on line %d", current.startIdx+1)
+		current.endIdx = idxNoEnd
+		patterns = append(patterns, current)
 	}
 	return patterns, nil
 }
