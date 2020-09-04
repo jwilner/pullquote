@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -32,14 +35,16 @@ func parsePackage(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.
 			packages.NeedName,
 		Context: ctx,
 		Fset:    fSet,
+		Tests:   true,
 	}, pat)
 	if err != nil {
 		return nil, err
 	}
-	if len(pkgs) > 0 {
-		return pkgs[0].Syntax, nil
+	var syntax []*ast.File
+	for _, pkg := range pkgs {
+		syntax = append(syntax, pkg.Syntax...)
 	}
-	return nil, nil
+	return syntax, nil
 }
 
 func parseDir(fSet *token.FileSet, pat string) ([]*ast.File, error) {
@@ -66,8 +71,8 @@ func parseDir(fSet *token.FileSet, pat string) ([]*ast.File, error) {
 	return files, nil
 }
 
-func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
-	res := make([]string, 0, len(pqs))
+func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) {
+	res := make([]*expanded, 0, len(pqs))
 	for _, pq := range pqs {
 		fSet := token.NewFileSet()
 
@@ -84,7 +89,7 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 			files, err = parseDir(fSet, pat)
 		}
 
-		s, err := sprintNodeWithName(fSet, files, sym, pq.goPrintFlags)
+		s, err := sprintNodeWithName(fSet, files, sym, pq.goPrintFlags, pq.fmt == fmtExample)
 		if err != nil {
 			return nil, fmt.Errorf("error within %v: %w", pat, err)
 		}
@@ -94,10 +99,11 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 	return res, nil
 }
 
-func sprintNodeWithName(fSet *token.FileSet, files []*ast.File, name string, flags goPrintFlag) (string, error) {
+func sprintNodeWithName(fSet *token.FileSet, files []*ast.File, name string, flags goPrintFlag, example bool) (*expanded, error) {
 	for _, f := range files {
 		var (
 			found []byte
+			parts [][]byte
 			err   error
 		)
 		ast.Inspect(f, func(node ast.Node) bool {
@@ -151,12 +157,18 @@ func sprintNodeWithName(fSet *token.FileSet, files []*ast.File, name string, fla
 					break
 				}
 				found, err = renderNode(fSet, x.Doc, x)
+				if err != nil {
+					return false
+				}
+				if example {
+					parts, err = parseExampleTest(found)
+				}
 				return false
 			}
 			return true
 		})
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if found == nil {
 			continue
@@ -164,9 +176,87 @@ func sprintNodeWithName(fSet *token.FileSet, files []*ast.File, name string, fla
 		if flags&noRealignTabs == 0 {
 			found = realignTabs(found)
 		}
-		return string(found), nil
+		exp := &expanded{String: string(found)}
+		for _, p := range parts {
+			exp.Parts = append(exp.Parts, string(p))
+		}
+		return exp, nil
 	}
-	return "", fmt.Errorf("couldn't find %q", name)
+	return nil, fmt.Errorf("couldn't find %q", name)
+}
+
+var (
+	regexpOutputComment = regexp.MustCompile(`^\s*//\s*Output:\s*$`)
+	regexpCommentPrefix = regexp.MustCompile(`^\s*//\s?(.*)$`)
+)
+
+func parseExampleTest(f []byte) (res [][]byte, err error) {
+	var (
+		sawDecl     bool
+		buf         bytes.Buffer
+		sawOutput   bool
+		firstPrefix = -1
+		write       = func(b []byte) {
+			if err != nil {
+				return
+			}
+			if buf.Len() != 0 {
+				buf.WriteByte('\n')
+			}
+			_, err = buf.Write(b)
+		}
+	)
+
+	s := bufio.NewScanner(bytes.NewReader(f))
+	for s.Scan() && err == nil {
+		if !sawDecl {
+			// check if decl
+			sawDecl = strings.HasPrefix(s.Text(), "func ")
+			continue
+		}
+		if sawOutput {
+			matches := regexpCommentPrefix.FindSubmatch(s.Bytes())
+			if len(matches) == 2 {
+				write(matches[1])
+			}
+			continue
+		}
+		if regexpOutputComment.MatchString(s.Text()) {
+			cp := make([]byte, buf.Len())
+			copy(cp, buf.Bytes())
+			res = append(res, cp)
+
+			buf.Reset()
+			sawOutput = true
+			continue
+		}
+		// in the function body
+		l := s.Bytes()
+
+		if firstPrefix == -1 {
+			firstPrefix = 0
+			for _, b := range l {
+				if b != '\t' {
+					break
+				}
+				firstPrefix++
+			}
+		}
+
+		start := 0
+		for start < firstPrefix && start < len(l) && l[start] == '\t' {
+			start++
+		}
+
+		write(l[start:])
+	}
+	if err == nil {
+		err = s.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append(res, buf.Bytes()), nil
 }
 
 func realignTabs(found []byte) []byte {

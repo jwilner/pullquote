@@ -171,66 +171,77 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 	return o.Name(), nil
 }
 
-func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writer) error {
-	writeWithNewLine := func(l []byte) error {
-		if _, err := w.Write(l); err != nil {
-			return err
-		}
-		_, err := w.Write([]byte{'\n'})
-		return err
+type applier struct {
+	w   io.Writer
+	err error
+}
+
+func (a *applier) write(l []byte) {
+	if a.err != nil {
+		return
+	}
+	_, a.err = a.w.Write(l)
+}
+
+func (a *applier) writeWithNewLine(l []byte) {
+	a.write(l)
+	a.write([]byte{'\n'})
+}
+
+func (a *applier) writeCodeFence(data []byte, lang string) {
+	codeFenceLiteral := []byte("```")
+	if bytes.HasPrefix(data, codeFenceLiteral) || bytes.Contains(data, []byte("\n```")) {
+		codeFenceLiteral = []byte("~~~")
 	}
 
+	a.writeWithNewLine(append(codeFenceLiteral, []byte(lang)...))
+	a.writeWithNewLine(data)
+	a.writeWithNewLine(codeFenceLiteral)
+}
+
+func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.Writer) error {
+	applier := applier{w, nil}
 	scanner := bufio.NewScanner(r)
-	for i := 0; scanner.Scan(); i++ {
+	for i := 0; scanner.Scan() && applier.err == nil; i++ {
+		var pq *pullQuote
+		if len(pqs) > 0 {
+			pq = pqs[0]
+		}
+
 		switch {
-		case len(pqs) == 0, i <= pqs[0].startIdx:
-			if err := writeWithNewLine(scanner.Bytes()); err != nil {
-				return err
-			}
+		case pq == nil || i <= pq.startIdx:
+			applier.writeWithNewLine(scanner.Bytes())
 
-		case i == pqs[0].endIdx:
+		case i == pq.endIdx:
+			exp := expanded[0]
 
-			format := pqs[0].fmt
-			lang := pqs[0].lang
-			if pqs[0].goPath != "" && format == "" && lang == "" {
-				format = fmtCodeFence
-				lang = "go"
-			}
-
-			switch format {
+			switch pq.fmt {
+			case fmtExample:
+				if len(exp.Parts) == 2 {
+					applier.writeWithNewLine([]byte("Code:"))
+					applier.writeCodeFence([]byte(exp.Parts[0]), pq.lang)
+					applier.writeWithNewLine([]byte("Output:"))
+					applier.writeCodeFence([]byte(exp.Parts[1]), "")
+					break
+				}
+				// we couldn't parse the example -- treat it like a standard codefence
+				applier.writeCodeFence([]byte(exp.String), pq.lang)
 			case fmtCodeFence:
-				codeFenceLiteral := []byte("```")
-				if strings.HasPrefix(expanded[0], "```") || strings.Contains(expanded[0], "\n```") {
-					codeFenceLiteral = []byte("~~~")
-				}
-
-				if err := writeWithNewLine(append(codeFenceLiteral, []byte(lang)...)); err != nil {
-					return err
-				}
-				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
-					return err
-				}
-				if err := writeWithNewLine(codeFenceLiteral); err != nil {
-					return err
-				}
+				applier.writeCodeFence([]byte(exp.String), pq.lang)
 			case fmtBlockQuote:
-				if _, err := w.Write([]byte{'>', ' '}); err != nil {
-					return err
-				}
-				if err := writeWithNewLine([]byte(strings.Replace(expanded[0], "\n", "\n> ", -1))); err != nil {
-					return err
-				}
+				applier.write([]byte{'>', ' '})
+				applier.writeWithNewLine([]byte(strings.Replace(exp.String, "\n", "\n> ", -1)))
 			default: // include fmtNone
-				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
-					return err
-				}
+				applier.writeWithNewLine([]byte(exp.String))
 			}
-			if err := writeWithNewLine(scanner.Bytes()); err != nil {
-				return err
-			}
+			applier.writeWithNewLine(scanner.Bytes())
+
 			pqs = pqs[1:]
 			expanded = expanded[1:]
 		}
+	}
+	if applier.err != nil {
+		return applier.err
 	}
 	return scanner.Err()
 }
@@ -288,8 +299,8 @@ func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 	return patterns, nil
 }
 
-func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
-	results := make([]string, len(pqs))
+func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) {
+	results := make([]*expanded, len(pqs))
 
 	var buf []*pullQuote
 
@@ -305,7 +316,7 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 			return nil, err
 		}
 		for j, cur := 0, 0; j < len(pqs); j++ {
-			if pqs[j].goPath == buf[cur].goPath {
+			if pqs[j] == buf[cur] {
 				results[j] = expanded[cur]
 				cur++
 			}
@@ -314,7 +325,7 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 	}
 
 	for i, pq := range pqs {
-		if results[i] != "" {
+		if results[i] != nil {
 			continue
 		}
 
@@ -342,7 +353,7 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]string, error) {
 	return results, nil
 }
 
-func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
+func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
 	f, err := os.Open(pqs[0].src)
 	if err != nil {
 		return nil, err
@@ -354,7 +365,7 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 	type state struct {
 		*pullQuote
 		*bytes.Buffer
-		result            string
+		result            *expanded
 		endMatchRemaining int
 	}
 
@@ -364,7 +375,7 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 		if pq.endCount != 0 {
 			endCountRem = pq.endCount
 		}
-		states = append(states, &state{pq, nil, "", endCountRem})
+		states = append(states, &state{pq, nil, nil, endCountRem})
 	}
 
 	{
@@ -372,7 +383,7 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 		for scanner.Scan() {
 			txt := scanner.Text()
 			for _, s := range states {
-				if s.result != "" {
+				if s.result != nil {
 					continue
 				}
 				if s.Buffer == nil {
@@ -385,7 +396,7 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 				if s.end.MatchString(txt) {
 					s.endMatchRemaining--
 					if s.endMatchRemaining == 0 {
-						s.result = s.Buffer.String()
+						s.result = &expanded{String: s.Buffer.String()}
 						s.Buffer = nil
 						continue
 					}
@@ -398,9 +409,9 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 		}
 	}
 
-	results := make([]string, 0, len(states))
+	results := make([]*expanded, 0, len(states))
 	for _, s := range states {
-		if s.result != "" {
+		if s.result != nil {
 			results = append(results, s.result)
 			continue
 		}
@@ -446,6 +457,8 @@ const (
 	fmtBlockQuote = "blockquote"
 	// fmtNone can be used to explicitly unset default formats
 	fmtNone = "none"
+	// fmtExample indicates that the code should be rendered like a godoc example
+	fmtExample = "example"
 )
 
 var (
@@ -453,7 +466,12 @@ var (
 	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
 	keysPullQuoteOptional = [...]string{keyEndCount}
 	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
-	validFmts             = map[string]bool{fmtCodeFence: true, fmtBlockQuote: true, fmtNone: true}
+	validFmts             = map[string]bool{
+		fmtBlockQuote: true,
+		fmtCodeFence:  true,
+		fmtExample:    true,
+		fmtNone:       true,
+	}
 )
 
 func parseLine(line string) (*pullQuote, error) {
@@ -630,6 +648,14 @@ func parseLine(line string) (*pullQuote, error) {
 	}
 
 	if pq.goPath != "" {
+		if pq.fmt == "" {
+			pq.fmt = fmtCodeFence
+			pq.lang = "go"
+			if strings.Contains(pq.goPath, "#Example") {
+				pq.fmt = fmtExample
+			}
+		}
+
 		for _, s := range keysGoquoteValid {
 			delete(seen, s)
 		}
@@ -689,3 +715,8 @@ const (
 	noRealignTabs
 	includeGroup
 )
+
+type expanded struct {
+	String string
+	Parts  []string
+}

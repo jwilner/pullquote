@@ -81,6 +81,8 @@ const (
 	fmtBlockQuote = "blockquote"
 	// fmtNone can be used to explicitly unset default formats
 	fmtNone = "none"
+	// fmtExample indicates that the code should be rendered like a godoc example
+	fmtExample = "example"
 )
 ```
 <!-- /goquote -->
@@ -91,7 +93,12 @@ var (
 	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
 	keysPullQuoteOptional = [...]string{keyEndCount}
 	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
-	validFmts             = map[string]bool{fmtCodeFence: true, fmtBlockQuote: true, fmtNone: true}
+	validFmts             = map[string]bool{
+		fmtBlockQuote: true,
+		fmtCodeFence:  true,
+		fmtExample:    true,
+		fmtNone:       true,
+	}
 )
 ```
 <!-- /goquote -->

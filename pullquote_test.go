@@ -271,19 +271,25 @@ func Test_parseLine(t *testing.T) {
 		{
 			"goquote",
 			`<!-- goquote .#Foo -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo"},
+			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go"},
 			"",
 		},
 		{
 			"goquote quoted",
 			`<!-- goquote ".#Foo" -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo"},
+			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go"},
 			"",
 		},
 		{
 			"goquote flag norealign",
 			`<!-- goquote .#Foo norealign -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo", goPrintFlags: noRealignTabs},
+			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go", goPrintFlags: noRealignTabs},
+			"",
+		},
+		{
+			"goquote example",
+			`<!-- goquote .#ExampleFooBar norealign -->`,
+			&pullQuote{tagType: "go", goPath: ".#ExampleFooBar", fmt: "example", lang: "go"},
 			"",
 		},
 	} {
@@ -735,7 +741,7 @@ const a int = 23`,
 				t.Fatalf("wanted %v matches but got %v", len(c.expected), len(res))
 			}
 			for i := range res {
-				if res[i] != c.expected[i] {
+				if res[i].String != c.expected[i] {
 					t.Errorf("wanted %q at %d but got %q", c.expected[i], i, res[i])
 				}
 			}
