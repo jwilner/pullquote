@@ -1,9 +1,9 @@
 hello
-<!-- pullquote gopath=.#nested -->
+<!-- goquote .#nested -->
 ```go
 nested := func() {
 	// this is a nested func
 }
 ```
-<!-- /pullquote -->
+<!-- /goquote -->
 bye

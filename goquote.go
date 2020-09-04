@@ -6,10 +6,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"golang.org/x/tools/go/packages"
 	"os"
 	"sort"
 	"strings"
+
+	"golang.org/x/tools/go/packages"
 )
 
 const parseMode = parser.ParseComments

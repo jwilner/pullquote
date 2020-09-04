@@ -1,4 +1,4 @@
 hello
-<!-- pullquote gopath=.#nested -->
-<!-- /pullquote -->
+<!-- goquote .#nested -->
+<!-- /goquote -->
 bye

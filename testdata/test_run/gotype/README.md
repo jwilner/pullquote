@@ -1,4 +1,4 @@
 hello
-<!-- pullquote gopath=.#fooBar -->
-<!-- /pullquote -->
+<!-- goquote .#fooBar -->
+<!-- /goquote -->
 bye

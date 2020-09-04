@@ -1,10 +1,10 @@
 hello
-<!-- pullquote gopath=.#fooBar -->
+<!-- goquote .#fooBar -->
 ```go
 // fooBar does some good stuff
 type fooBar struct {
 	a int // some info
 }
 ```
-<!-- /pullquote -->
+<!-- /goquote -->
 bye

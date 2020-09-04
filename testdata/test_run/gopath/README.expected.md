@@ -1,10 +1,10 @@
 hello
-<!-- pullquote gopath=.#fooBar -->
+<!-- goquote .#fooBar -->
 ```go
 // fooBar does some stuff
 func fooBar() {
 	// OK COOL
 }
 ```
-<!-- /pullquote -->
+<!-- /goquote -->
 bye

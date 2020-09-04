@@ -6,23 +6,25 @@ A simple documentation tool that keeps quotes or snippets in your docs up-to-dat
 
 ## Example
 
-Given a piece of code to document like
+Given a piece of code to document like:
+<!-- goquote testdata/test_run/gopath#fooBar -->
 ```go
-// fooBar is a very fine func
+// fooBar does some stuff
 func fooBar() {
-    fmt.Println("Cool!")
+	// OK COOL
 }
 ```
+<!-- /goquote -->
 
 - Insert a `pullquote` tag in your doc:
+<!-- pullquote src=testdata/test_run/gopath/README.md start=hello end=bye fmt=codefence lang=md -->
 ```md
-Lorem ipsum lorem ipsum.
-
-<!-- pullquote gopath=.#fooBar -->
-<!-- /pullquote -->
-
-Lorem ipsum lorem ipsum.
+hello
+<!-- goquote .#fooBar -->
+<!-- /goquote -->
+bye
 ```
+<!-- /pullquote -->
 
 - Run `pullquote` on  the doc
 ```shell
@@ -30,56 +32,66 @@ pullquote doc.md
 ```
 
 - `pullquote` adds the snippet between the quotes.
+<!-- pullquote src=testdata/test_run/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
 ~~~md
-Lorem ipsum lorem ipsum.
-
-<!-- pullquote gopath=.#fooBar -->
+hello
+<!-- goquote .#fooBar -->
 ```go
-// fooBar is a very fine func
+// fooBar does some stuff
 func fooBar() {
-    fmt.Println("Cool!")
+	// OK COOL
 }
 ```
-<!-- /pullquote -->
-
-Lorem ipsum lorem ipsum.
+<!-- /goquote -->
+bye
 ~~~
+<!-- /pullquote -->
 
 That's it.
 
 ## Options:
 
-There are two mutually exclusive groups of pullquote options:
+<!-- goquote .#keySrc includegroup -->
+```go
+const (
+	// keyGoPath sets the path to a go expression or statement to print; can also be specified via goquote tag
+	keyGoPath = "gopath"
+	// keyNoRealign disables realigning go tabs for the snippet
+	keyNoRealign = "norealign"
+	// keyIncludeGroup includes the whole group declaration, not just the single named statement
+	keyIncludeGroup = "includegroup"
 
-`gopath` group:
+	// keySrc specifies the file from which to take a pullquote
+	keySrc = "src"
+	// keyStart specifies a pattern for the line on which a pullquote begins
+	keyStart = "start"
+	// keyEnd specifies a pattern for the line on which a pullquote ends
+	keyEnd = "end"
+	// keyEndCount specifies the number of times the `end` pattern should match before ending the quote; default 1
+	keyEndCount = "endcount"
 
-- `gopath` (required)
+	// keyFmt specifies a format -- can be `none`, `blockquote`, or `codefence`; for goquote, defaults to codefence.
+	keyFmt = "fmt"
+	// keyLang specifies the language highlighting to be used with a codefence.
+	keyLang = "lang"
 
-    The path to a package or file and a symbol within in the format `PATH_TO_PACKAGE_OR_FILE#SYMBOL`. Non-local packages are supported; e.g. `errors#New`.
-
-`src` group:
-
-- `src` (required)
-
-    Specifies the file from which to pull the quote.
-
-
-- `start` (required)
-
-    A pattern or substring specifying the line on which to begin. Matches the first occurrence of the pattern.
-
-- `end` (required)
-
-    A pattern or substring specifying the line on which to end. Matches the first occurrence of the pattern after the start, or, if `endcount` is specified, the nth occurrence.
-
-- `fmt`
-    - `codefence` markdown code fence formatting, optionally with a language if `lang` specified
-    - `blockquote` markdown block quote formatting
-
-- `endcount`
-
-    Specifies the number of times to match the end pattern before closing the pull quote.
-
-- `lang`
-
-    Specifies the language, if any, with which to highlight the `codefence`.
+	// fmtCodeFence specifies that the snippet should be rendered within a "codefence" -- i.e. ```
+	fmtCodeFence = "codefence"
+	// fmtCodeFence specifies that the snippet should be rendered as a blockquote
+	fmtBlockQuote = "blockquote"
+	// fmtNone can be used to explicitly unset default formats
+	fmtNone = "none"
+)
+```
+<!-- /goquote -->
+<!-- goquote .#keysCommonOptional includegroup -->
+```go
+var (
+	keysCommonOptional    = [...]string{keyFmt, keyLang}
+	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
+	keysPullQuoteOptional = [...]string{keyEndCount}
+	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
+	validFmts             = map[string]bool{fmtCodeFence: true, fmtBlockQuote: true, fmtNone: true}
+)
+```
+<!-- /goquote -->

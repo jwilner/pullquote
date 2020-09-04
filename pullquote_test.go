@@ -129,8 +129,8 @@ bye
 					"my/README.md",
 					`
 hello
-<!-- pullquote gopath=./#fooBar -->
-<!-- /pullquote -->
+<!-- goquote ./#fooBar -->
+<!-- /goquote -->
 bye
 `,
 				},
@@ -147,13 +147,13 @@ func fooBar() {
 			"my/README.md",
 			`
 hello
-<!-- pullquote gopath=./#fooBar -->
+<!-- goquote ./#fooBar -->
 ` + "```" + `go
 func fooBar() {
 	// OK COOL
 }
 ` + "```" + `
-<!-- /pullquote -->
+<!-- /goquote -->
 bye
 `,
 			"",
@@ -198,56 +198,56 @@ func Test_parseLine(t *testing.T) {
 	}{
 		{
 			"unquoted src",
-			"<!-- pullquote src=hi -->",
-			&pullQuote{src: "hi"},
+			"<!-- pullquote src=hi start=a end=b -->",
+			&pullQuote{tagType: "pull", src: "hi", start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"quoted src",
-			`<!-- pullquote src="hi" -->`,
-			&pullQuote{src: "hi"},
+			`<!-- pullquote src="hi" start=a end=b -->`,
+			&pullQuote{tagType: "pull", src: "hi", start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped src",
-			`<!-- pullquote src="hi\\" -->`,
-			&pullQuote{src: `hi\`},
+			`<!-- pullquote src="hi\\" start=a end=b -->`,
+			&pullQuote{tagType: "pull", src: `hi\`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src",
-			`<!-- pullquote src="h \"" -->`,
-			&pullQuote{src: `h "`},
+			`<!-- pullquote src="h \"" start=a end=b -->`,
+			&pullQuote{tagType: "pull", src: `h "`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src middle",
-			`<!-- pullquote src="h\"here" -->`,
-			&pullQuote{src: `h"here`},
+			`<!-- pullquote src="h\"here" start=a end=b -->`,
+			&pullQuote{tagType: "pull", src: `h"here`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src middle multi backslash",
-			`<!-- pullquote src="h\\\"here" -->`,
-			&pullQuote{src: `h\"here`},
+			`<!-- pullquote src="h\\\"here" start=a end=b -->`,
+			&pullQuote{tagType: "pull", src: `h\"here`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"start",
-			`<!-- pullquote src="here" start=hi -->`,
-			&pullQuote{src: `here`, start: reg("hi")},
+			`<!-- pullquote src="here" start=hi end=b -->`,
+			&pullQuote{tagType: "pull", src: `here`, start: reg("hi"), end: reg("b")},
 			"",
 		},
 		{
 			"here end",
 			`<!-- pullquote src="here.go" start="hi" end=bye -->`,
-			&pullQuote{src: `here.go`, start: reg("hi"), end: reg("bye")},
+			&pullQuote{tagType: "pull", src: `here.go`, start: reg("hi"), end: reg("bye")},
 			"",
 		},
 		{
 			"no quotes",
 			`<!-- pullquote src=here.go start=hi end=bye fmt=codefence -->`,
-			&pullQuote{src: `here.go`, start: reg("hi"), end: reg("bye"), fmt: "codefence"},
+			&pullQuote{tagType: "pull", src: `here.go`, start: reg("hi"), end: reg("bye"), fmt: "codefence"},
 			"",
 		},
 		{
@@ -260,13 +260,31 @@ func Test_parseLine(t *testing.T) {
 			"unclosed key",
 			`<!-- pullquote src -->`,
 			nil,
-			`unclosed key expression: "src"`,
+			`no value given for "src"`,
 		},
 		{
 			"unclosed escape",
 			`<!-- pullquote src="\ -->`,
 			nil,
 			`unclosed escape expression`,
+		},
+		{
+			"goquote",
+			`<!-- goquote .#Foo -->`,
+			&pullQuote{tagType: "go", goPath: ".#Foo"},
+			"",
+		},
+		{
+			"goquote quoted",
+			`<!-- goquote ".#Foo" -->`,
+			&pullQuote{tagType: "go", goPath: ".#Foo"},
+			"",
+		},
+		{
+			"goquote flag norealign",
+			`<!-- goquote .#Foo norealign -->`,
+			&pullQuote{tagType: "go", goPath: ".#Foo", goPrintFlags: noRealignTabs},
+			"",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -306,7 +324,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- /pullquote -->
 `,
 			[]*pullQuote{
-				{src: "here.go", start: reg("hi"), end: reg("bye")},
+				{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
 			},
 			"",
 		},
@@ -319,8 +337,25 @@ func Test_readPatterns(t *testing.T) {
 <!-- /pullquote -->
 `,
 			[]*pullQuote{
-				{src: "here.go", start: reg("hi"), end: reg("bye")},
-				{src: "here1.go", start: reg("hi1"), end: reg("bye1")},
+				{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
+				{tagType: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
+			},
+			"",
+		},
+		{
+			"skip codefence",
+			`
+` + "```go" + `
+~~~
+<!-- pullquote src=here.go start=hi end=bye -->
+<!-- /pullquote -->
+~~~
+` + "```" + `
+<!-- pullquote src=here1.go start=hi1 end=bye1 -->
+<!-- /pullquote -->
+`,
+			[]*pullQuote{
+				{tagType: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
 			},
 			"",
 		},
@@ -338,7 +373,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote src=here.go start=hi -->
 `,
 			nil,
-			"invalid pull quote on line 2: end cannot be unset",
+			"parsing line 2: \"end\" cannot be unset",
 		},
 		{
 			"missing start",
@@ -346,7 +381,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote src=here.go end=hi -->
 `,
 			nil,
-			"invalid pull quote on line 2: start cannot be unset",
+			"parsing line 2: \"start\" cannot be unset",
 		},
 		{
 			"missing src",
@@ -354,7 +389,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote start=here.go end=hi -->
 `,
 			nil,
-			"invalid pull quote on line 2: src cannot be unset",
+			"parsing line 2: \"src\" cannot be unset",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -756,6 +791,39 @@ func changeTmpDir(t *testing.T) *testDir {
 }
 
 func comparePQ(t *testing.T, expected, got *pullQuote) {
+	for _, comp := range []struct {
+		l, r interface{}
+	}{
+		{expected.goPath, got.goPath},
+		{expected.src, got.src},
+		{expected.fmt, got.fmt},
+		{expected.lang, got.lang},
+		{expected.tagType, got.tagType},
+
+		{expected.endCount, got.endCount},
+
+		{expected.start, got.start},
+		{expected.end, got.end},
+	} {
+		switch v := comp.l.(type) {
+		case string:
+			if v != comp.r.(string) {
+				t.Fatalf("wanted %q but got %q", comp.l, comp.r)
+			}
+		case int:
+			if v != comp.r.(int) {
+				t.Fatalf("wanted %v but got %v", comp.l, comp.r)
+			}
+		case *regexp.Regexp:
+			compareRegexps(t, v, comp.r.(*regexp.Regexp))
+		default:
+			panic("unknown type")
+		}
+	}
+
+	if expected.goPath != got.goPath {
+		t.Fatalf("wanted %q but got %q", expected.goPath, got.goPath)
+	}
 	if expected.src != got.src {
 		t.Fatalf("wanted %q but got %q", expected.src, got.src)
 	}
@@ -773,18 +841,6 @@ func compareRegexps(t *testing.T, expected, got *regexp.Regexp) {
 	}
 	if expS != gotS {
 		t.Fatalf("wanted %q but got %q", expS, gotS)
-	}
-}
-
-func compareLines(t *testing.T, expected, got string) {
-	eL, gL := strings.Split(expected, "\n"), strings.Split(got, "\n")
-	if len(eL) != len(gL) {
-		t.Fatalf("Expected %d lines but got %d: %q", len(eL), len(gL), got)
-	}
-	for i := range eL {
-		if eL[i] != gL[i] {
-			t.Fatalf("Expected at line %d %q but got %q", i, eL[i], gL[i])
-		}
 	}
 }
 

@@ -13,13 +13,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 )
 
 func main() {
-	fns := make([]string, 0, len(os.Args)-1)
+	fns := make([]string, len(os.Args)-1)
 	copy(fns, os.Args[1:])
 
 	// add in stdin if present
@@ -192,29 +193,34 @@ func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writ
 			format := pqs[0].fmt
 			lang := pqs[0].lang
 			if pqs[0].goPath != "" && format == "" && lang == "" {
-				format = "codefence"
+				format = fmtCodeFence
 				lang = "go"
 			}
 
 			switch format {
-			case "codefence":
-				if err := writeWithNewLine(append([]byte{'`', '`', '`'}, []byte(lang)...)); err != nil {
+			case fmtCodeFence:
+				codeFenceLiteral := []byte("```")
+				if strings.HasPrefix(expanded[0], "```") || strings.Contains(expanded[0], "\n```") {
+					codeFenceLiteral = []byte("~~~")
+				}
+
+				if err := writeWithNewLine(append(codeFenceLiteral, []byte(lang)...)); err != nil {
 					return err
 				}
 				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
 					return err
 				}
-				if err := writeWithNewLine([]byte{'`', '`', '`'}); err != nil {
+				if err := writeWithNewLine(codeFenceLiteral); err != nil {
 					return err
 				}
-			case "blockquote":
+			case fmtBlockQuote:
 				if _, err := w.Write([]byte{'>', ' '}); err != nil {
 					return err
 				}
 				if err := writeWithNewLine([]byte(strings.Replace(expanded[0], "\n", "\n> ", -1))); err != nil {
 					return err
 				}
-			default:
+			default: // include fmtNone
 				if err := writeWithNewLine([]byte(expanded[0])); err != nil {
 					return err
 				}
@@ -231,14 +237,33 @@ func applyPullQuotes(pqs []*pullQuote, expanded []string, r io.Reader, w io.Writ
 
 func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 	var (
-		patterns []*pullQuote
-		current  *pullQuote
-		scanner  = bufio.NewScanner(r)
-		i        int
+		patterns  []*pullQuote
+		current   *pullQuote
+		scanner   = bufio.NewScanner(r)
+		i         int
+		codefence string
 	)
 	for ; scanner.Scan(); i++ {
+		line := scanner.Text()
+
+		if codefence != "" {
+			if strings.HasPrefix(line, codefence) {
+				codefence = ""
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			codefence = line[:3]
+			continue
+		}
+
 		if current != nil {
-			if regexpWrapperEnd.MatchString(scanner.Text()) {
+			if match := regexpWrapperEnd.FindStringSubmatch(line); len(match) == 2 {
+				if match[1] != current.tagType {
+					return nil, fmt.Errorf("wanted %vquote end but got %vquote end", current.tagType, match[1])
+				}
+
 				current.endIdx = i
 				patterns = append(patterns, current)
 				current = nil
@@ -247,13 +272,10 @@ func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 		}
 
 		var err error
-		if current, err = parseLine(scanner.Text()); err != nil {
+		if current, err = parseLine(line); err != nil {
 			return nil, fmt.Errorf("parsing line %v: %w", i+1, err)
 		}
 		if current != nil {
-			if err = validate(current); err != nil {
-				return nil, fmt.Errorf("invalid pull quote on line %v: %w", i+1, err)
-			}
 			current.startIdx = i
 		}
 	}
@@ -392,38 +414,118 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]string, error) {
 }
 
 var (
-	regexpWrapper    = regexp.MustCompile(`^\s*<!--\s*pullquote\s*(.*?)\s*-->\s*$`)
-	regexpWrapperEnd = regexp.MustCompile(`^\s*<!--\s*/pullquote\s*-->\s*$`)
+	regexpWrapper    = regexp.MustCompile(`^\s*<!--\s*(pull|go)quote\s*(.*?)\s*-->\s*$`)
+	regexpWrapperEnd = regexp.MustCompile(`^\s*<!--\s*/(pull|go)quote\s*-->\s*$`)
+)
+
+const (
+	// keyGoPath sets the path to a go expression or statement to print; can also be specified via goquote tag
+	keyGoPath = "gopath"
+	// keyNoRealign disables realigning go tabs for the snippet
+	keyNoRealign = "norealign"
+	// keyIncludeGroup includes the whole group declaration, not just the single named statement
+	keyIncludeGroup = "includegroup"
+
+	// keySrc specifies the file from which to take a pullquote
+	keySrc = "src"
+	// keyStart specifies a pattern for the line on which a pullquote begins
+	keyStart = "start"
+	// keyEnd specifies a pattern for the line on which a pullquote ends
+	keyEnd = "end"
+	// keyEndCount specifies the number of times the `end` pattern should match before ending the quote; default 1
+	keyEndCount = "endcount"
+
+	// keyFmt specifies a format -- can be `none`, `blockquote`, or `codefence`; for goquote, defaults to codefence.
+	keyFmt = "fmt"
+	// keyLang specifies the language highlighting to be used with a codefence.
+	keyLang = "lang"
+
+	// fmtCodeFence specifies that the snippet should be rendered within a "codefence" -- i.e. ```
+	fmtCodeFence = "codefence"
+	// fmtCodeFence specifies that the snippet should be rendered as a blockquote
+	fmtBlockQuote = "blockquote"
+	// fmtNone can be used to explicitly unset default formats
+	fmtNone = "none"
+)
+
+var (
+	keysCommonOptional    = [...]string{keyFmt, keyLang}
+	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
+	keysPullQuoteOptional = [...]string{keyEndCount}
+	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
+	validFmts             = map[string]bool{fmtCodeFence: true, fmtBlockQuote: true, fmtNone: true}
 )
 
 func parseLine(line string) (*pullQuote, error) {
 	groups := regexpWrapper.FindStringSubmatch(line)
-	if len(groups) != 2 {
+	if len(groups) != 3 {
 		return nil, nil
 	}
 
 	var (
-		options          = []rune(groups[1])
+		pq               = pullQuote{tagType: groups[1]}
+		options          = []rune(groups[2])
 		keyIdxs, valIdxs = [2]int{-1, -1}, [2]int{-1, -1}
 		escaped          bool
-		pat              pullQuote
+		seen             = make(map[string]struct{})
 	)
 
+	const skipKey = -2
+	if pq.tagType == "go" {
+		keyIdxs = [2]int{skipKey, skipKey}
+	}
+
 	for i, r := range options {
+		last := i == len(options)-1
+
 		switch {
 		case keyIdxs[0] == -1:
 			if unicode.IsLetter(r) {
 				keyIdxs[0] = i
 			}
+			if !last {
+				continue
+			}
+			// both start and end
+			fallthrough
 
 		case keyIdxs[1] == -1:
 			if r == '=' {
 				keyIdxs[1] = i
+				continue
+			}
+			if unicode.IsSpace(r) {
+				keyIdxs[1] = i
+			} else if last {
+				keyIdxs[1] = len(options)
+			} else {
+				continue
+			}
+
+			// valueless key
+			key := string(options[keyIdxs[0]:keyIdxs[1]])
+			if _, ok := seen[key]; ok {
+				return nil, fmt.Errorf("%v provided more than once", key)
+			}
+
+			switch key {
+			case keyNoRealign:
+				seen[key] = struct{}{}
+				pq.goPrintFlags |= noRealignTabs
+				keyIdxs = [2]int{-1, -1}
+			case keyIncludeGroup:
+				seen[key] = struct{}{}
+				pq.goPrintFlags |= includeGroup
+				keyIdxs = [2]int{-1, -1}
 			}
 
 		case valIdxs[0] == -1:
 			valIdxs[0] = i
-
+			if !last {
+				continue
+			}
+			// both start and end
+			fallthrough
 		case valIdxs[1] == -1:
 			if options[valIdxs[0]] == '"' {
 				if r == '\\' {
@@ -451,7 +553,7 @@ func parseLine(line string) (*pullQuote, error) {
 					curEsc = false
 				}
 				valIdxs[1] = cur
-			} else if i == len(options)-1 {
+			} else if last {
 				valIdxs[1] = len(options)
 			} else if !unicode.IsSpace(r) {
 				continue
@@ -459,32 +561,43 @@ func parseLine(line string) (*pullQuote, error) {
 				valIdxs[1] = i
 			}
 
-			key := string(options[keyIdxs[0]:keyIdxs[1]])
+			var key string
+			if keyIdxs[0] == skipKey {
+				key = keyGoPath
+			} else {
+				key = string(options[keyIdxs[0]:keyIdxs[1]])
+			}
+
+			if _, ok := seen[key]; ok {
+				return nil, fmt.Errorf("%v provided more than once", key)
+			}
+			seen[key] = struct{}{}
+
 			val := string(options[valIdxs[0]:valIdxs[1]])
 			switch key {
-			case "src":
-				pat.src = val
-			case "start":
+			case keySrc:
+				pq.src = val
+			case keyStart:
 				var err error
-				if pat.start, err = regexp.Compile(val); err != nil {
+				if pq.start, err = regexp.Compile(val); err != nil {
 					return nil, fmt.Errorf("invalid start %q: %w", val, err)
 				}
-			case "end":
+			case keyEnd:
 				var err error
-				if pat.end, err = regexp.Compile(val); err != nil {
+				if pq.end, err = regexp.Compile(val); err != nil {
 					return nil, fmt.Errorf("invalid end %q: %w", val, err)
 				}
-			case "endcount":
+			case keyEndCount:
 				var err error
-				if pat.endCount, err = strconv.Atoi(val); err != nil {
+				if pq.endCount, err = strconv.Atoi(val); err != nil {
 					return nil, fmt.Errorf("invalid endcount %q: %w", val, err)
 				}
-			case "fmt":
-				pat.fmt = val
-			case "lang":
-				pat.lang = val
-			case "gopath":
-				pat.goPath = val
+			case keyFmt:
+				pq.fmt = val
+			case keyLang:
+				pq.lang = val
+			case keyGoPath:
+				pq.goPath = val
 			default:
 				return nil, fmt.Errorf("unknown key %q with value %q", key, val)
 			}
@@ -507,26 +620,52 @@ func parseLine(line string) (*pullQuote, error) {
 	if keyIdxs[0] != -1 {
 		return nil, fmt.Errorf("unclosed key expression: %q", string(options))
 	}
-	return &pat, nil
+
+	if pq.fmt != "" && !validFmts[pq.fmt] {
+		return nil, errors.New("fmt must be codefence, blockquote, or none")
+	}
+
+	for _, s := range keysCommonOptional {
+		delete(seen, s)
+	}
+
+	if pq.goPath != "" {
+		for _, s := range keysGoquoteValid {
+			delete(seen, s)
+		}
+
+		if len(seen) > 0 {
+			return nil, fmt.Errorf("invalid keys for goquote: %v", strings.Join(sortedKeys(seen), ", "))
+		}
+
+		return &pq, nil
+	}
+
+	for _, s := range keysPullQuoteOptional {
+		delete(seen, s)
+	}
+
+	for _, s := range keysPullQuoteRequired {
+		if _, ok := seen[s]; !ok {
+			return nil, fmt.Errorf("%q cannot be unset", s)
+		}
+		delete(seen, s)
+	}
+
+	if len(seen) > 0 {
+		return nil, fmt.Errorf("invalid keys for pullquote: %v", strings.Join(sortedKeys(seen), ", "))
+	}
+
+	return &pq, nil
 }
 
-func validate(pq *pullQuote) error {
-	if pq.goPath != "" {
-		return nil
+func sortedKeys(m map[string]struct{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-
-	switch {
-	case pq.src == "":
-		return errors.New("src cannot be unset")
-	case pq.start == nil:
-		return errors.New("start cannot be unset")
-	case pq.end == nil:
-		return errors.New("end cannot be unset")
-	case pq.fmt != "" && pq.fmt != "codefence" && pq.fmt != "blockquote":
-		return errors.New("must be codefence or blockquote")
-	default:
-		return nil
-	}
+	sort.Strings(keys)
+	return keys
 }
 
 type pullQuote struct {
@@ -539,6 +678,8 @@ type pullQuote struct {
 	goPrintFlags goPrintFlag
 
 	startIdx, endIdx int
+
+	tagType string
 }
 
 type goPrintFlag uint
