@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 func main() {
@@ -164,8 +165,12 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 		return ",", fmt.Errorf("f.seek 0: %w", err)
 	}
 
-	if err := applyPullQuotes(pqs, expanded, f, o); err != nil {
+	w := bufio.NewWriter(o)
+	if err := applyPullQuotes(pqs, expanded, f, w); err != nil {
 		return "", fmt.Errorf("failed applying pull quotes: %w", err)
+	}
+	if err := w.Flush(); err != nil {
+		return "", fmt.Errorf("couldn't flush: %w", err)
 	}
 
 	return o.Name(), nil
@@ -199,9 +204,29 @@ func (a *applier) writeCodeFence(data []byte, lang string) {
 	a.writeWithNewLine(codeFenceLiteral)
 }
 
+func newlineIncludingScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			// We have a full newline-terminated line.
+			return i + 1, data[:i+1], nil
+		}
+		// If we're at EOF, we have a final, non-terminated line. Return it.
+		if atEOF {
+			return len(data), data, nil
+		}
+		// Request more data.
+		return 0, nil, nil
+	})
+	return scanner
+}
+
 func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.Writer) error {
 	applier := applier{w, nil}
-	scanner := bufio.NewScanner(r)
+	scanner := newlineIncludingScanner(r)
 	for i := 0; scanner.Scan() && applier.err == nil; i++ {
 		var pq *pullQuote
 		if len(pqs) > 0 {
@@ -210,10 +235,10 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.W
 
 		switch {
 		case pq == nil || i < pq.startIdx:
-			applier.writeWithNewLine(scanner.Bytes())
+			applier.write(scanner.Bytes())
 
 		case i == pq.startIdx:
-			applier.writeWithNewLine(scanner.Bytes())
+			applier.write(scanner.Bytes())
 
 			exp := expanded[0]
 
@@ -246,7 +271,7 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.W
 			}
 
 		case i == pq.endIdx:
-			applier.writeWithNewLine(scanner.Bytes())
+			applier.write(scanner.Bytes())
 
 			pqs = pqs[1:]
 			expanded = expanded[1:]
@@ -318,6 +343,11 @@ func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
 		patterns = append(patterns, current)
 	}
 	return patterns, nil
+}
+
+type expanded struct {
+	String string
+	Parts  []string
 }
 
 func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) {
@@ -400,7 +430,7 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
 	}
 
 	{
-		scanner := bufio.NewScanner(f)
+		scanner := newlineIncludingScanner(f)
 		for scanner.Scan() {
 			txt := scanner.Text()
 			for _, s := range states {
@@ -417,12 +447,11 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
 				if s.end.MatchString(txt) {
 					s.endMatchRemaining--
 					if s.endMatchRemaining == 0 {
-						s.result = &expanded{String: s.Buffer.String()}
+						s.result = &expanded{String: strings.TrimRight(s.Buffer.String(), "\r\n")}
 						s.Buffer = nil
 						continue
 					}
 				}
-				s.Buffer.WriteByte('\n')
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -495,226 +524,6 @@ var (
 	}
 )
 
-func parseLine(line string) (*pullQuote, error) {
-	groups := regexpWrapper.FindStringSubmatch(line)
-	if len(groups) != 3 {
-		return nil, nil
-	}
-
-	var (
-		pq               = pullQuote{tagType: groups[1]}
-		options          = []rune(groups[2])
-		keyIdxs, valIdxs = [2]int{-1, -1}, [2]int{-1, -1}
-		escaped          bool
-		seen             = make(map[string]struct{})
-	)
-
-	const skipKey = -2
-	if pq.tagType == "go" {
-		keyIdxs = [2]int{skipKey, skipKey}
-	}
-
-	for i, r := range options {
-		last := i == len(options)-1
-
-		switch {
-		case keyIdxs[0] == -1:
-			if unicode.IsLetter(r) {
-				keyIdxs[0] = i
-			}
-			if !last {
-				continue
-			}
-			// both start and end
-			fallthrough
-
-		case keyIdxs[1] == -1:
-			if r == '=' {
-				keyIdxs[1] = i
-				continue
-			}
-			if unicode.IsSpace(r) {
-				keyIdxs[1] = i
-			} else if last {
-				keyIdxs[1] = len(options)
-			} else {
-				continue
-			}
-
-			// valueless key
-			key := string(options[keyIdxs[0]:keyIdxs[1]])
-			if _, ok := seen[key]; ok {
-				return nil, fmt.Errorf("%v provided more than once", key)
-			}
-
-			switch key {
-			case keyNoRealign:
-				seen[key] = struct{}{}
-				pq.goPrintFlags |= noRealignTabs
-				keyIdxs = [2]int{-1, -1}
-			case keyIncludeGroup:
-				seen[key] = struct{}{}
-				pq.goPrintFlags |= includeGroup
-				keyIdxs = [2]int{-1, -1}
-			}
-
-		case valIdxs[0] == -1:
-			valIdxs[0] = i
-			if !last {
-				continue
-			}
-			// both start and end
-			fallthrough
-		case valIdxs[1] == -1:
-			if options[valIdxs[0]] == '"' {
-				if r == '\\' {
-					escaped = !escaped
-					continue
-				}
-				if r != '"' || escaped {
-					escaped = false
-					continue
-				}
-				valIdxs[0]++
-
-				// remove escaping in the current buffer
-				var (
-					cur    = valIdxs[0]
-					curEsc bool
-				)
-				for j := valIdxs[0]; j < i; j++ {
-					if options[j] == '\\' && !curEsc {
-						curEsc = true
-						continue
-					}
-					options[cur] = options[j]
-					cur++
-					curEsc = false
-				}
-				valIdxs[1] = cur
-			} else if last {
-				valIdxs[1] = len(options)
-			} else if !unicode.IsSpace(r) {
-				continue
-			} else {
-				valIdxs[1] = i
-			}
-
-			var key string
-			if keyIdxs[0] == skipKey {
-				key = keyGoPath
-			} else {
-				key = string(options[keyIdxs[0]:keyIdxs[1]])
-			}
-
-			if _, ok := seen[key]; ok {
-				return nil, fmt.Errorf("%v provided more than once", key)
-			}
-			seen[key] = struct{}{}
-
-			val := string(options[valIdxs[0]:valIdxs[1]])
-			switch key {
-			case keySrc:
-				pq.src = val
-			case keyStart:
-				var err error
-				if pq.start, err = regexp.Compile(val); err != nil {
-					return nil, fmt.Errorf("invalid start %q: %w", val, err)
-				}
-			case keyEnd:
-				var err error
-				if pq.end, err = regexp.Compile(val); err != nil {
-					return nil, fmt.Errorf("invalid end %q: %w", val, err)
-				}
-			case keyEndCount:
-				var err error
-				if pq.endCount, err = strconv.Atoi(val); err != nil {
-					return nil, fmt.Errorf("invalid endcount %q: %w", val, err)
-				}
-			case keyFmt:
-				pq.fmt = val
-			case keyLang:
-				pq.lang = val
-			case keyGoPath:
-				pq.goPath = val
-			default:
-				return nil, fmt.Errorf("unknown key %q with value %q", key, val)
-			}
-
-			keyIdxs[0], keyIdxs[1] = -1, -1
-			valIdxs[0], valIdxs[1] = -1, -1
-			escaped = false
-		}
-	}
-
-	if escaped {
-		return nil, errors.New("unclosed escape expression")
-	}
-	if valIdxs[0] != -1 {
-		return nil, fmt.Errorf("unclosed value expression: %q", string(options[valIdxs[0]:]))
-	}
-	if keyIdxs[1] != -1 {
-		return nil, fmt.Errorf("no value given for %q", string(options[keyIdxs[0]:keyIdxs[1]]))
-	}
-	if keyIdxs[0] != -1 {
-		return nil, fmt.Errorf("unclosed key expression: %q", string(options))
-	}
-
-	if pq.fmt != "" && !validFmts[pq.fmt] {
-		return nil, errors.New("fmt must be codefence, blockquote, or none")
-	}
-
-	for _, s := range keysCommonOptional {
-		delete(seen, s)
-	}
-
-	if pq.goPath != "" {
-		if pq.fmt == "" {
-			pq.fmt = fmtCodeFence
-			pq.lang = "go"
-			if strings.Contains(pq.goPath, "#Example") {
-				pq.fmt = fmtExample
-			}
-		}
-
-		for _, s := range keysGoquoteValid {
-			delete(seen, s)
-		}
-
-		if len(seen) > 0 {
-			return nil, fmt.Errorf("invalid keys for goquote: %v", strings.Join(sortedKeys(seen), ", "))
-		}
-
-		return &pq, nil
-	}
-
-	for _, s := range keysPullQuoteOptional {
-		delete(seen, s)
-	}
-
-	for _, s := range keysPullQuoteRequired {
-		if _, ok := seen[s]; !ok {
-			return nil, fmt.Errorf("%q cannot be unset", s)
-		}
-		delete(seen, s)
-	}
-
-	if len(seen) > 0 {
-		return nil, fmt.Errorf("invalid keys for pullquote: %v", strings.Join(sortedKeys(seen), ", "))
-	}
-
-	return &pq, nil
-}
-
-func sortedKeys(m map[string]struct{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 type pullQuote struct {
 	src        string
 	start, end *regexp.Regexp
@@ -737,7 +546,273 @@ const (
 	includeGroup
 )
 
-type expanded struct {
-	String string
-	Parts  []string
+func setOptions(pq *pullQuote, options string) (map[string]struct{}, error) {
+	b := builder{pq: pq, seen: make(map[string]struct{})}
+
+	// our expressions require maximum three "tokens"
+	window := make([]string, 0, 3)
+
+	if pq.tagType == "go" { // goquote tagtype is equivalent to an initial `gopath=`
+		window = append(window, keyGoPath, "=")
+	}
+
+	toks := tokenizingScanner(strings.NewReader(options))
+	for toks.Scan() && b.err == nil {
+		window = append(window, toks.Text())
+		switch len(window) {
+		case 2:
+			if window[1] != "=" { // one off key
+				b.set(window[0], "", false)
+				window[0] = window[1]
+				window = window[:1]
+			}
+		case 3: // ["key", "=", "value"]
+			b.set(window[0], window[2], true)
+			window = window[:0]
+		}
+	}
+	if b.err == nil {
+		b.err = toks.Err()
+	}
+	switch len(window) { // check remainders
+	case 1:
+		b.set(window[0], "", false)
+	case 2:
+		b.set(window[0], "", false)
+		b.set(window[1], "", false)
+	}
+	return b.seen, b.err
+}
+
+func parseLine(line string) (*pullQuote, error) {
+	groups := regexpWrapper.FindStringSubmatch(line)
+	if len(groups) != 3 {
+		return nil, nil
+	}
+
+	pq := pullQuote{tagType: groups[1]}
+
+	seen, err := setOptions(&pq, groups[2])
+	if err != nil {
+		return nil, err
+	}
+
+	return &pq, validate(&pq, seen)
+}
+
+func validate(pq *pullQuote, seen map[string]struct{}) error {
+	if pq.fmt != "" && !validFmts[pq.fmt] {
+		return errors.New("fmt must be codefence, blockquote, or none")
+	}
+
+	for _, s := range keysCommonOptional {
+		delete(seen, s)
+	}
+
+	if pq.goPath != "" {
+		if pq.fmt == "" {
+			pq.fmt = fmtCodeFence
+			pq.lang = "go"
+			if strings.Contains(pq.goPath, "#Example") {
+				pq.fmt = fmtExample
+			}
+		}
+
+		for _, s := range keysGoquoteValid {
+			delete(seen, s)
+		}
+
+		if err := checkRemaining(seen); err != nil {
+			return fmt.Errorf("goquote: %w", err)
+		}
+		return nil
+	}
+
+	for _, s := range keysPullQuoteOptional {
+		delete(seen, s)
+	}
+
+	for _, s := range keysPullQuoteRequired {
+		if _, ok := seen[s]; !ok {
+			return fmt.Errorf("%q cannot be unset", s)
+		}
+		delete(seen, s)
+	}
+
+	if err := checkRemaining(seen); err != nil {
+		return fmt.Errorf("pullquote: %w", err)
+	}
+	return nil
+}
+
+func checkRemaining(m map[string]struct{}) error {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return fmt.Errorf("invalid keys: %v", strings.Join(keys, ", "))
+}
+
+type builder struct {
+	pq   *pullQuote
+	err  error
+	seen map[string]struct{}
+}
+
+func (b *builder) vSetTest(k string, want, got bool) bool {
+	if b.err == nil && want != got {
+		b.err = fmt.Errorf("%q requires value", k)
+		if !want {
+			b.err = fmt.Errorf("%q does not take a value", k)
+		}
+	}
+	return b.err == nil
+}
+
+func (b *builder) set(k, v string, vSet bool) {
+	if b.err != nil {
+		return
+	}
+	if _, ok := b.seen[k]; ok {
+		b.err = fmt.Errorf("key %v already seen", k)
+		return
+	}
+
+	b.seen[k] = struct{}{}
+
+	switch k {
+	case keyIncludeGroup:
+		b.vSetTest(keyIncludeGroup, false, vSet)
+		b.pq.goPrintFlags |= includeGroup
+	case keyNoRealign:
+		b.vSetTest(keyNoRealign, false, vSet)
+		b.pq.goPrintFlags |= noRealignTabs
+	case keySrc:
+		b.vSetTest(keySrc, true, vSet)
+		b.pq.src = v
+	case keyStart:
+		if b.vSetTest(keyStart, true, vSet) {
+			if b.pq.start, b.err = regexp.Compile(v); b.err != nil {
+				b.err = fmt.Errorf("invalid start %q: %w", v, b.err)
+			}
+		}
+	case keyEnd:
+		if b.vSetTest(keyEnd, true, vSet) {
+			if b.pq.end, b.err = regexp.Compile(v); b.err != nil {
+				b.err = fmt.Errorf("invalid end %q: %w", v, b.err)
+			}
+		}
+	case keyEndCount:
+		if b.vSetTest(keyEndCount, true, vSet) {
+			if b.pq.endCount, b.err = strconv.Atoi(v); b.err != nil {
+				b.err = fmt.Errorf("invalid endcount %q: %w", v, b.err)
+			}
+		}
+	case keyFmt:
+		b.pq.fmt = v
+	case keyLang:
+		b.pq.lang = v
+	case keyGoPath:
+		b.pq.goPath = v
+	default:
+		if vSet {
+			b.err = fmt.Errorf("unknown key %q with value %q", k, v)
+			break
+		}
+		b.err = fmt.Errorf("unknown key %q", k)
+	}
+}
+
+var errTokUnterminated = errors.New("unterminated token")
+
+func tokenizingScanner(r io.Reader) *bufio.Scanner {
+	unescape := func(buf []byte) []byte {
+		var (
+			cur     int
+			escaped bool
+			quote   rune
+		)
+		for i, width := 0, 0; i < len(buf); i += width {
+			var r rune
+			r, width = utf8.DecodeRune(buf[i:])
+			if !escaped {
+				switch {
+				case r == '\\':
+					escaped = true
+					continue
+				case quote != 0:
+					if r == quote {
+						quote = 0
+						continue
+					}
+				case r == '\'' || r == '"':
+					quote = r
+					continue
+				}
+			}
+			escaped = false
+			copy(buf[cur:cur+width], buf[i:i+width])
+			cur += width
+		}
+		return buf[:cur]
+	}
+
+	s := bufio.NewScanner(r)
+	s.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		// Skip leading spaces.
+		start := 0
+		for width := 0; start < len(data); start += width {
+			var r rune
+			r, width = utf8.DecodeRune(data[start:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+		}
+		var (
+			quote   rune
+			escaped bool
+		)
+		// Scan until unquoted space or equals, marking end of word.
+		for width, i := 0, start; i < len(data); i += width {
+			var r rune
+			r, width = utf8.DecodeRune(data[i:])
+			switch {
+			case escaped:
+				escaped = false
+
+			case r == '\\':
+				escaped = true
+
+			case quote != 0:
+				if r == quote {
+					quote = 0
+				}
+
+			case r == '\'' || r == '"':
+				quote = r
+
+			case r == '=':
+				if i == start { // just `=`
+					return i + width, data[start : i+width], nil
+				}
+				return i, unescape(data[start:i]), nil
+
+			case unicode.IsSpace(r):
+				return i + width, unescape(data[start:i]), nil
+			}
+		}
+		if atEOF && len(data) > start {
+			if quote != 0 || escaped {
+				return len(data), data[start:], errTokUnterminated
+			}
+			return len(data), unescape(data[start:]), nil
+		}
+		// Request more data.
+		return start, nil, nil
+	})
+	return s
 }

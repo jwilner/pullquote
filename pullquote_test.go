@@ -184,7 +184,7 @@ bye
 			}
 			got := string(b)
 			if got != c.expected {
-				t.Fatalf("wanted %q but got %q", c.expected, got)
+				t.Fatalf("wanted:\n%q\ngot:\n%q", c.expected, got)
 			}
 		})
 	}
@@ -254,19 +254,19 @@ func Test_parseLine(t *testing.T) {
 			"unclosed quotes",
 			`<!-- pullquote src="hi -->`,
 			nil,
-			`unclosed value expression: "\"hi"`,
+			errTokUnterminated.Error(),
 		},
 		{
 			"unclosed key",
 			`<!-- pullquote src -->`,
 			nil,
-			`no value given for "src"`,
+			`"src" requires value`,
 		},
 		{
 			"unclosed escape",
 			`<!-- pullquote src="\ -->`,
 			nil,
-			`unclosed escape expression`,
+			errTokUnterminated.Error(),
 		},
 		{
 			"goquote",
@@ -742,7 +742,7 @@ const a int = 23`,
 			}
 			for i := range res {
 				if res[i].String != c.expected[i] {
-					t.Errorf("wanted %q at %d but got %q", c.expected[i], i, res[i])
+					t.Errorf("wanted at %d:\n%q\ngot:\n%q", i, c.expected[i], res[i].String)
 				}
 			}
 		})
@@ -873,4 +873,58 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(g, f)
 	return err
+}
+
+func Test_tokenizingScanner(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		val  string
+		res  []string
+	}{
+		{
+			"whitespace stripped",
+			"  abc  ",
+			[]string{"abc"},
+		},
+		{
+			"quoted",
+			`  "abc ="  `,
+			[]string{`abc =`},
+		},
+		{
+			"escaped quote",
+			`  "abc \""  `,
+			[]string{`abc "`},
+		},
+		{
+			"equals in the middle",
+			`  "abc \""=23  `,
+			[]string{`abc "`, `=`, `23`},
+		},
+		{
+			"double escape",
+			`  "abc \\"=23  `,
+			[]string{`abc \`, `=`, `23`},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := tokenizingScanner(strings.NewReader(tt.val))
+			var res []string
+			for sc.Scan() {
+				res = append(res, sc.Text())
+			}
+			if err := sc.Err(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for i, r := range tt.res {
+				if i >= len(res) {
+					t.Errorf("token %d: wanted %v but missing", i, r)
+					continue
+				}
+				if r != res[i] {
+					t.Errorf("token %d: wanted %v but got %v", i, r, res[i])
+				}
+			}
+		})
+	}
 }
