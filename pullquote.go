@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"errors"
+	"flag"
 	"fmt"
+	"hash"
 	"io"
 	"io/ioutil"
 	"log"
@@ -16,13 +19,28 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
 
+var (
+	logger   = log.New(os.Stderr, "", 0)
+	debug, _ = strconv.ParseBool(os.Getenv("DEBUG"))
+)
+
 func main() {
-	fns := make([]string, len(os.Args)-1)
-	copy(fns, os.Args[1:])
+	if debug {
+		logger = log.New(os.Stderr, "", log.LstdFlags|log.Lshortfile)
+	}
+
+	checkMode := flag.Bool("check", false, "whether to run in check mode")
+
+	flag.Parse()
+
+	args := flag.Args()
+	fns := make([]string, len(args))
+	copy(fns, args)
 
 	// add in stdin if present
 	if stat, _ := os.Stdin.Stat(); stat != nil && stat.Mode()&os.ModeCharDevice == 0 {
@@ -31,15 +49,24 @@ func main() {
 			fns = append(fns, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			log.Fatal(err)
+			logger.Fatalf("err=%q", err)
 		}
 	}
 
 	ctx, cncl := signalCtx()
 	defer cncl()
-	if err := run(ctx, fns); err != nil {
+	if err := run(ctx, *checkMode, fns); err != nil {
 		cncl()
-		log.Fatal(err)
+
+		if !errors.Is(err, errCheckMode) {
+			logger.Fatalf("err=%q", err)
+		}
+
+		logger.Println(`msg="changes detected"`)
+		os.Exit(2)
+	}
+	if *checkMode {
+		logger.Println(`msg="no changes detected"`)
 	}
 }
 
@@ -59,7 +86,9 @@ func signalCtx() (context.Context, context.CancelFunc) {
 	return ctx, cncl
 }
 
-func run(ctx context.Context, fns []string) error {
+var errCheckMode = errors.New("files changed")
+
+func run(ctx context.Context, checkMode bool, fns []string) error {
 	if len(fns) == 0 {
 		return errors.New("no files provided")
 	}
@@ -92,6 +121,9 @@ func run(ctx context.Context, fns []string) error {
 		moves  [][2]string
 	)
 	for i, res := len(fns)-1, <-resultCh; i >= 0; i-- {
+		if debug && res.err != nil {
+			logger.Printf("file=%q err=%q", res.fn, res.err)
+		}
 		if err != nil {
 			if res.err != nil {
 				others++
@@ -114,6 +146,9 @@ func run(ctx context.Context, fns []string) error {
 		}
 		return fmt.Errorf("%v failed: %w", errFn, err)
 	}
+	if checkMode && len(moves) > 0 {
+		return errCheckMode
+	}
 	for _, m := range moves {
 		if err := os.Rename(m[0], m[1]); err != nil {
 			return fmt.Errorf("os.Rename(%v, %v): %w", m[0], m[1], err)
@@ -122,7 +157,40 @@ func run(ctx context.Context, fns []string) error {
 	return nil
 }
 
+var msgKey = func() interface{} { // lawl
+	type ctxKey struct{}
+	return ctxKey{}
+}()
+
+func addLogCtx(ctx context.Context, format string, args ...interface{}) context.Context {
+	var b strings.Builder
+	if msg, ok := ctx.Value(msgKey).(string); ok {
+		b.WriteString(msg)
+		if r, _ := utf8.DecodeLastRuneInString(msg); !unicode.IsSpace(r) { // zero len safe
+			b.WriteByte(' ')
+		}
+	}
+	_, _ = fmt.Fprintf(&b, format, args...)
+	return context.WithValue(ctx, msgKey, b.String())
+}
+
+func ctxLogf(ctx context.Context, format string, args ...interface{}) {
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, format, args...)
+
+	if msg, ok := ctx.Value(msgKey).(string); ok {
+		if r, _ := utf8.DecodeLastRuneInString(b.String()); !unicode.IsSpace(r) { // zero len safe
+			b.WriteByte(' ')
+		}
+		b.WriteString(msg)
+	}
+
+	_ = logger.Output(2, b.String())
+}
+
 func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
+	ctx = addLogCtx(ctx, "filename=%q", fn)
+
 	f, err := os.Open(fn)
 	if err != nil {
 		return "", fmt.Errorf("os.Open(%v): %w", fn, err)
@@ -133,9 +201,12 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 		}
 	}()
 
-	pqs, err := readPullQuotes(f)
+	pqs, err := readPullQuotes(ctx, f)
 	if err != nil {
 		return "", fmt.Errorf("readPullQuotes %v: %w", fn, err)
+	}
+	if debug {
+		ctxLogf(ctx, "total_pullquotes=%v", len(pqs))
 	}
 	if len(pqs) == 0 {
 		return "", nil
@@ -160,48 +231,74 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("unable to open tmp file: %w", err)
 	}
+	defer func() {
+		_ = o.Close()
+	}()
+	if err := func() error {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("f.seek 0: %w", err)
+		}
+		w := bufio.NewWriter(o)
+		if err := applyPullQuotes(pqs, expanded, f, w); err != nil {
+			return fmt.Errorf("failed applying pull quotes: %w", err)
+		}
 
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("couldn't flush: %w", err)
+		}
+		return nil
+	}(); err != nil {
+		return "", err
+	}
+
+	changed, err := filesChanged(f, o)
+	switch {
+	case err != nil:
+		ctxLogf(ctx, `msg="detecting file change" err=%q`, err)
+		return o.Name(), nil
+	case changed:
+		ctxLogf(ctx, `msg="change detected"`)
+		return o.Name(), nil
+	default:
+		ctxLogf(ctx, `msg="no change detected"`)
+		return "", nil
+	}
+}
+
+var hashPool = sync.Pool{
+	New: func() interface{} {
+		return sha1.New()
+	},
+}
+
+func filesChanged(a, b *os.File) (bool, error) {
+	hA, hB := hashPool.Get().(hash.Hash), hashPool.Get().(hash.Hash)
+	defer func() {
+		hashPool.Put(hA)
+		hashPool.Put(hB)
+	}()
+	bA, err := calcHash(hA, a)
+	if err != nil {
+		return false, err
+	}
+	bB, err := calcHash(hB, b)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(bA, bB), nil
+}
+
+func calcHash(h hash.Hash, f *os.File) ([]byte, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return ",", fmt.Errorf("f.seek 0: %w", err)
+		return nil, err
 	}
 
-	w := bufio.NewWriter(o)
-	if err := applyPullQuotes(pqs, expanded, f, w); err != nil {
-		return "", fmt.Errorf("failed applying pull quotes: %w", err)
-	}
-	if err := w.Flush(); err != nil {
-		return "", fmt.Errorf("couldn't flush: %w", err)
+	h.Reset()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
 	}
 
-	return o.Name(), nil
-}
-
-type applier struct {
-	w   io.Writer
-	err error
-}
-
-func (a *applier) write(l []byte) {
-	if a.err != nil {
-		return
-	}
-	_, a.err = a.w.Write(l)
-}
-
-func (a *applier) writeWithNewLine(l []byte) {
-	a.write(l)
-	a.write([]byte{'\n'})
-}
-
-func (a *applier) writeCodeFence(data []byte, lang string) {
-	codeFenceLiteral := []byte("```")
-	if bytes.HasPrefix(data, codeFenceLiteral) || bytes.Contains(data, []byte("\n```")) {
-		codeFenceLiteral = []byte("~~~")
-	}
-
-	a.writeWithNewLine(append(codeFenceLiteral, []byte(lang)...))
-	a.writeWithNewLine(data)
-	a.writeWithNewLine(codeFenceLiteral)
+	return h.Sum(nil), nil
 }
 
 func newlineIncludingScanner(r io.Reader) *bufio.Scanner {
@@ -224,125 +321,130 @@ func newlineIncludingScanner(r io.Reader) *bufio.Scanner {
 	return scanner
 }
 
-func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r io.Reader, w io.Writer) error {
-	applier := applier{w, nil}
-	scanner := newlineIncludingScanner(r)
-	for i := 0; scanner.Scan() && applier.err == nil; i++ {
-		var pq *pullQuote
-		if len(pqs) > 0 {
-			pq = pqs[0]
+type readerAtSeeker interface {
+	io.ReaderAt
+	io.ReadSeeker
+}
+
+func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r readerAtSeeker, w io.Writer) (err error) {
+	write := func(s string) {
+		if err != nil {
+			return
+		}
+		_, err = w.Write([]byte(s))
+	}
+
+	writeCodeFence := func(data, lang string) {
+		if err != nil {
+			return
+		}
+		format := "\n```%s\n%s\n```\n"
+		if strings.HasPrefix(data, "```") || strings.Contains(data, "\n```") {
+			format = "\n~~~%s\n%s\n~~~\n"
+		}
+		_, err = fmt.Fprintf(w, format, lang, data)
+	}
+
+	// every pq has a start offset and, optionally, and end index
+	readThrough := 0
+	for i, pq := range pqs {
+		exp := expanded[i]
+
+		if _, err = io.Copy(w, io.NewSectionReader(r, int64(readThrough), int64(pq.startIdx-readThrough))); err != nil {
+			break
+		}
+		readThrough = pq.startIdx
+
+		switch pq.fmt {
+		case fmtExample:
+			if len(exp.Parts) != 2 {
+				writeCodeFence(exp.String, pq.lang)
+				break
+			}
+			write("\nCode:")
+			writeCodeFence(exp.Parts[0], pq.lang)
+			write("Output:")
+			writeCodeFence(exp.Parts[1], "")
+		case fmtCodeFence:
+			writeCodeFence(exp.String, pq.lang)
+		case fmtBlockQuote:
+			write("\n> ")
+			write(strings.Replace(exp.String, "\n", "\n> ", -1) + "\n")
+		default:
+			write("\n" + exp.String + "\n")
 		}
 
-		switch {
-		case pq == nil || i < pq.startIdx:
-			applier.write(scanner.Bytes())
-
-		case i == pq.startIdx:
-			applier.write(scanner.Bytes())
-
-			exp := expanded[0]
-
-			switch pq.fmt {
-			case fmtExample:
-				if len(exp.Parts) != 2 {
-					// we couldn't parse the example -- treat it like a standard codefence
-					applier.writeCodeFence([]byte(exp.String), pq.lang)
-					break
-				}
-				applier.writeWithNewLine([]byte("Code:"))
-				applier.writeCodeFence([]byte(exp.Parts[0]), pq.lang)
-				applier.writeWithNewLine([]byte("Output:"))
-				applier.writeCodeFence([]byte(exp.Parts[1]), "")
-			case fmtCodeFence:
-				applier.writeCodeFence([]byte(exp.String), pq.lang)
-			case fmtBlockQuote:
-				applier.write([]byte{'>', ' '})
-				applier.writeWithNewLine([]byte(strings.Replace(exp.String, "\n", "\n> ", -1)))
-			default: // include fmtNone
-				applier.writeWithNewLine([]byte(exp.String))
-			}
-
-			if pq.endIdx == idxNoEnd {
-				// add in the end tag
-				applier.writeWithNewLine([]byte(fmt.Sprintf("<!-- /%vquote -->", pq.tagType)))
-
-				pqs = pqs[1:]
-				expanded = expanded[1:]
-			}
-
-		case i == pq.endIdx:
-			applier.write(scanner.Bytes())
-
-			pqs = pqs[1:]
-			expanded = expanded[1:]
+		if pq.endIdx == idxNoEnd { // add an end tag
+			write("<!-- /" + pq.tagType + "quote -->")
+		} else {
+			readThrough = pq.endIdx // skip any intervening content -- we have rewritten it
 		}
 	}
-	if applier.err != nil {
-		return applier.err
+	if err != nil {
+		return err
 	}
-	return scanner.Err()
+
+	if _, err = r.Seek(int64(readThrough), io.SeekStart); err != nil {
+		return err
+	}
+	_, err = io.Copy(w, r)
+
+	return err
 }
 
 const idxNoEnd = -1
 
-func readPullQuotes(r io.Reader) ([]*pullQuote, error) {
-	var (
-		patterns  []*pullQuote
-		current   *pullQuote
-		scanner   = bufio.NewScanner(r)
-		i         int
-		codefence string
-	)
-	for ; scanner.Scan(); i++ {
-		line := scanner.Text()
+func readPullQuotes(ctx context.Context, r io.Reader) ([]*pullQuote, error) {
+	var pqs []*pullQuote
 
-		if codefence != "" {
-			if strings.HasPrefix(line, codefence) {
-				codefence = ""
-			}
-			continue
-		}
+	comments := htmlCommentScanner(r)
+	for comments.Scan() {
+		b := comments.Bytes()
 
-		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
-			codefence = line[:3]
-			continue
-		}
+		ctx := addLogCtx(ctx, "start=%v end=%v comment=%q", comments.start, comments.end, string(b))
 
-		if current != nil {
-			if match := regexpWrapperEnd.FindStringSubmatch(line); len(match) == 2 {
-				if match[1] != current.tagType {
-					return nil, fmt.Errorf("wanted %vquote end but got %vquote end", current.tagType, match[1])
+		toks := tokenizingScanner(bytes.NewReader(b[len("<!--") : len(b)-len("-->")]))
+		toks.Scan()
+
+		var tt string
+		switch t := toks.Text(); t {
+		case "pullquote":
+			tt = "pull"
+		case "goquote":
+			tt = "go"
+		case "/pullquote", "/goquote":
+			if l := len(pqs) - 1; l >= 0 && pqs[l].endIdx == idxNoEnd && strings.HasPrefix(t, "/"+pqs[l].tagType) {
+				pqs[l].endIdx = comments.start
+				if debug {
+					ctxLogf(ctx, `msg="found pullquote end" pq=%q`, pqs[l])
 				}
-
-				current.endIdx = i
-				patterns = append(patterns, current)
-				current = nil
 				continue
 			}
-		}
-
-		next, err := parseLine(line)
-		if err != nil {
-			return nil, fmt.Errorf("parsing line %v: %w", i+1, err)
-		}
-		if next == nil {
+			return nil, fmt.Errorf("unexpected %v at offset %v: %q", t, comments.start, string(b))
+		default:
+			if debug {
+				ctxLogf(ctx, `msg="unsupported comment tag"`)
+			}
 			continue
 		}
-		next.startIdx = i
-		if current != nil {
-			current.endIdx = idxNoEnd
-			patterns = append(patterns, current)
+
+		pq := pullQuote{tagType: tt, startIdx: comments.end, endIdx: idxNoEnd}
+		seen, err := setOptions(&pq, toks)
+		if err != nil {
+			return nil, fmt.Errorf("parsing pullquote at offset %v: %w", comments.start, err)
 		}
-		current = next
+		if err := validate(&pq, seen); err != nil {
+			return nil, fmt.Errorf("validating pullquote at offset %v: %w", comments.start, err)
+		}
+		if debug {
+			ctxLogf(ctx, `msg="found pullquote" pq=%q`, &pq)
+		}
+		pqs = append(pqs, &pq)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning failed after %v lines(s): %w", i+1, err)
+	if err := comments.Err(); err != nil {
+		return nil, err
 	}
-	if current != nil {
-		current.endIdx = idxNoEnd
-		patterns = append(patterns, current)
-	}
-	return patterns, nil
+	return pqs, nil
 }
 
 type expanded struct {
@@ -350,6 +452,7 @@ type expanded struct {
 	Parts  []string
 }
 
+// doing it w/o hash maps for s&gs
 func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) {
 	results := make([]*expanded, len(pqs))
 
@@ -361,12 +464,13 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error
 			buf = append(buf, pq)
 		}
 	}
+
 	if len(buf) > 0 {
 		expanded, err := expandGoQuotes(ctx, buf)
 		if err != nil {
 			return nil, err
 		}
-		for j, cur := 0, 0; j < len(pqs); j++ {
+		for j, cur := 0, 0; j < len(pqs) && cur < len(buf); j++ {
 			if pqs[j] == buf[cur] {
 				results[j] = expanded[cur]
 				cur++
@@ -474,11 +578,6 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
 	return results, nil
 }
 
-var (
-	regexpWrapper    = regexp.MustCompile(`^\s*<!--\s*(pull|go)quote\s*(.*?)\s*-->\s*$`)
-	regexpWrapperEnd = regexp.MustCompile(`^\s*<!--\s*/(pull|go)quote\s*-->\s*$`)
-)
-
 const (
 	// keyGoPath sets the path to a go expression or statement to print; can also be specified via goquote tag
 	keyGoPath = "gopath"
@@ -538,6 +637,62 @@ type pullQuote struct {
 	tagType string
 }
 
+// String returns a representation of the PQ for debugging; it is _not_ a valid serialization.
+func (pq *pullQuote) String() string {
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "<!-- %vquote", pq.tagType)
+
+	if pq.goPath != "" {
+		if pq.tagType == "go" {
+			_, _ = fmt.Fprintf(&b, " %q", pq.goPath)
+		} else {
+			_, _ = fmt.Fprintf(&b, " gopath=%q", pq.goPath)
+		}
+	}
+
+	for _, t := range []struct {
+		key string
+		val interface{}
+	}{
+		{"startIdx", pq.startIdx},
+		{"endIdx", pq.endIdx},
+		{keySrc, pq.src},
+		{keyStart, pq.start},
+		{keyEnd, pq.end},
+		{keyEndCount, pq.endCount},
+		{keyFmt, pq.fmt},
+		{keyLang, pq.lang},
+		{keyIncludeGroup, pq.goPrintFlags&includeGroup != 0},
+		{keyNoRealign, pq.goPrintFlags&noRealignTabs != 0},
+	} {
+		switch v := t.val.(type) {
+		case bool:
+			if v {
+				_, _ = fmt.Fprintf(&b, " %v", t.key)
+			}
+			continue
+		case string:
+			if v != "" {
+				_, _ = fmt.Fprintf(&b, " %v=%q", t.key, v)
+			}
+		case int:
+			if v != 0 {
+				_, _ = fmt.Fprintf(&b, " %v=%d", t.key, v)
+			}
+		case *regexp.Regexp:
+			if v != nil {
+				_, _ = fmt.Fprintf(&b, " %v=%q", t.key, v)
+			}
+		default:
+			_, _ = fmt.Fprintf(&b, " %v=UNKNOWN(%v)", t.key, v)
+		}
+	}
+
+	_, _ = io.WriteString(&b, " -->")
+
+	return b.String()
+}
+
 type goPrintFlag uint
 
 const (
@@ -546,7 +701,13 @@ const (
 	includeGroup
 )
 
-func setOptions(pq *pullQuote, options string) (map[string]struct{}, error) {
+type scanner interface {
+	Scan() bool
+	Text() string
+	Err() error
+}
+
+func setOptions(pq *pullQuote, toks scanner) (map[string]struct{}, error) {
 	b := builder{pq: pq, seen: make(map[string]struct{})}
 
 	// our expressions require maximum three "tokens"
@@ -556,7 +717,6 @@ func setOptions(pq *pullQuote, options string) (map[string]struct{}, error) {
 		window = append(window, keyGoPath, "=")
 	}
 
-	toks := tokenizingScanner(strings.NewReader(options))
 	for toks.Scan() && b.err == nil {
 		window = append(window, toks.Text())
 		switch len(window) {
@@ -584,25 +744,9 @@ func setOptions(pq *pullQuote, options string) (map[string]struct{}, error) {
 	return b.seen, b.err
 }
 
-func parseLine(line string) (*pullQuote, error) {
-	groups := regexpWrapper.FindStringSubmatch(line)
-	if len(groups) != 3 {
-		return nil, nil
-	}
-
-	pq := pullQuote{tagType: groups[1]}
-
-	seen, err := setOptions(&pq, groups[2])
-	if err != nil {
-		return nil, err
-	}
-
-	return &pq, validate(&pq, seen)
-}
-
 func validate(pq *pullQuote, seen map[string]struct{}) error {
 	if pq.fmt != "" && !validFmts[pq.fmt] {
-		return errors.New("fmt must be codefence, blockquote, or none")
+		return errors.New("fmt must be example, codefence, blockquote, or none")
 	}
 
 	for _, s := range keysCommonOptional {
@@ -613,7 +757,7 @@ func validate(pq *pullQuote, seen map[string]struct{}) error {
 		if pq.fmt == "" {
 			pq.fmt = fmtCodeFence
 			pq.lang = "go"
-			if strings.Contains(pq.goPath, "#Example") {
+			if strings.Contains(pq.goPath, "#Example") { // likely example test
 				pq.fmt = fmtExample
 			}
 		}
@@ -729,7 +873,13 @@ func (b *builder) set(k, v string, vSet bool) {
 
 var errTokUnterminated = errors.New("unterminated token")
 
-func tokenizingScanner(r io.Reader) *bufio.Scanner {
+type trackingScanner struct {
+	*bufio.Scanner
+	start int
+	end   int
+}
+
+func tokenizingScanner(r io.Reader) *trackingScanner {
 	unescape := func(buf []byte) []byte {
 		var (
 			cur     int
@@ -761,8 +911,11 @@ func tokenizingScanner(r io.Reader) *bufio.Scanner {
 		return buf[:cur]
 	}
 
-	s := bufio.NewScanner(r)
-	s.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+	var toks trackingScanner
+	toks.Scanner = bufio.NewScanner(r)
+	toks.Scanner.Split(func(data []byte, atEOF bool) (advance int, _ []byte, _ error) {
+		defer func() { toks.end += advance }()
+
 		// Skip leading spaces.
 		start := 0
 		for width := 0; start < len(data); start += width {
@@ -772,6 +925,9 @@ func tokenizingScanner(r io.Reader) *bufio.Scanner {
 				break
 			}
 		}
+
+		toks.start = toks.end + start
+
 		var (
 			quote   rune
 			escaped bool
@@ -802,7 +958,7 @@ func tokenizingScanner(r io.Reader) *bufio.Scanner {
 				return i, unescape(data[start:i]), nil
 
 			case unicode.IsSpace(r):
-				return i + width, unescape(data[start:i]), nil
+				return i, unescape(data[start:i]), nil
 			}
 		}
 		if atEOF && len(data) > start {
@@ -814,5 +970,81 @@ func tokenizingScanner(r io.Reader) *bufio.Scanner {
 		// Request more data.
 		return start, nil, nil
 	})
-	return s
+	return &toks
+}
+
+func htmlCommentScanner(r io.Reader) *trackingScanner {
+	detectCodeFence := func(data []byte) (int, int) {
+		tickStart := bytes.Index(data, []byte("\n```"))
+		tildeStart := bytes.Index(data, []byte("\n~~~"))
+
+		var (
+			start int
+			delim []byte
+		)
+		switch {
+		case tickStart == -1 && tildeStart == -1:
+			return -1, -1
+		case tildeStart == -1:
+			start, delim = tickStart, []byte("\n```")
+		case tickStart == -1, tildeStart < tickStart:
+			start, delim = tildeStart, []byte("\n~~~")
+		default:
+			start, delim = tickStart, []byte("\n```")
+		}
+
+		end := bytes.Index(data[start+len(delim):], delim)
+		if end == -1 {
+			return start, -1
+		}
+		return start, start + end + len(delim)*2
+	}
+
+	detectComment := func(data []byte) (int, int) {
+		if end := bytes.Index(data, []byte("-->")); end > 0 {
+			start := bytes.LastIndex(data[:end], []byte("<!--"))
+			return start, end + len("-->")
+		}
+		return bytes.Index(data, []byte("<!--")), -1
+	}
+
+	var html trackingScanner
+	html.Scanner = bufio.NewScanner(r)
+	html.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		defer func() { html.end += advance }()
+
+		// all indices, slices should be interpreted relative to i
+		i := 0
+
+		cfStart, cfEnd := detectCodeFence(data[i:]) // should always be interpreted relative to i
+		for cfStart != -1 && cfEnd != -1 {          // complete codefence in front of us; let's process it
+			if cmStart, cmEnd := detectComment(data[i : i+cfStart]); cmStart != -1 && cmEnd != -1 {
+				html.start = html.end + cmStart + i
+				return i + cmEnd, data[i+cmStart : i+cmEnd], nil
+			}
+			// jump past this codefence and continue
+			i += cfEnd
+			cfStart, cfEnd = detectCodeFence(data[i:])
+		}
+
+		{
+			searchRange := data[i:]
+			if cfStart != -1 {
+				searchRange = data[i : i+cfStart]
+			}
+
+			if cmStart, cmEnd := detectComment(searchRange); cmStart != -1 && cmEnd != -1 {
+				html.start = html.end + cmStart + i
+				return cmEnd + i, data[cmStart+i : cmEnd+i], nil
+			}
+		}
+
+		if cfStart == -1 { // no codefence ahead but still couldn't find comment -- jump to end of data
+			return len(data), nil, nil
+		}
+
+		// codefence start ahead with no comment intervening, but no end present -- jump to start of codefence
+		return i + cfStart, nil, nil
+	})
+	return &html
 }

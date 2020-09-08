@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,6 +24,9 @@ func Test_run(t *testing.T) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		if e.Name() != "multiple" {
 			continue
 		}
 		dataDir, err := filepath.Abs(filepath.Join("testdata/test_run", e.Name()))
@@ -55,35 +60,50 @@ func Test_run(t *testing.T) {
 				t.Fatalf("unable to copy: %v", err)
 			}
 
-			if err := run(context.Background(), inFiles); err != nil {
-				t.Fatal(err)
+			checkEqual := func(t *testing.T) {
+				for i := 0; i < len(expectedFiles); i++ {
+					expected, err := ioutil.ReadFile(expectedFiles[i])
+					if err != nil {
+						t.Fatal(err)
+					}
+					in, err := ioutil.ReadFile(inFiles[i])
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(expected, in) {
+						if golden {
+							if err := ioutil.WriteFile(expectedFiles[i], in, 0o644); err != nil {
+								t.Fatal(err)
+							}
+							return
+						}
+						t.Fatalf("outputs did not match\nwanted:\n\n%v\n\ngot:\n\n%v", string(expected), string(in))
+					}
+				}
 			}
 
-			for i := 0; i < len(expectedFiles); i++ {
-				expected, err := ioutil.ReadFile(expectedFiles[i])
-				if err != nil {
+			t.Run("first pass", func(t *testing.T) {
+				if err := run(context.Background(), false, inFiles); err != nil {
 					t.Fatal(err)
 				}
-				in, err := ioutil.ReadFile(inFiles[i])
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(expected, in) {
-					if golden {
-						if err := ioutil.WriteFile(expectedFiles[i], in, 0o644); err != nil {
-							t.Fatal(err)
-						}
-						return
-					}
-					t.Fatalf("outputs did not match\nwanted:\n\n%v\n\ngot:\n\n%v", string(expected), string(in))
-				}
+				checkEqual(t)
+			})
+
+			if t.Failed() {
+				t.SkipNow()
 			}
+
+			t.Run("idempotent", func(t *testing.T) {
+				if err := run(context.Background(), false, inFiles); err != nil {
+					t.Fatal(err)
+				}
+				checkEqual(t)
+			})
 		})
 	}
 }
 
 func Test_processFile(t *testing.T) {
-
 	for _, c := range []struct {
 		name                 string
 		files                [][2]string
@@ -254,19 +274,19 @@ func Test_parseLine(t *testing.T) {
 			"unclosed quotes",
 			`<!-- pullquote src="hi -->`,
 			nil,
-			errTokUnterminated.Error(),
+			fmt.Errorf("parsing pullquote at offset 0: %w", errTokUnterminated).Error(),
 		},
 		{
 			"unclosed key",
 			`<!-- pullquote src -->`,
 			nil,
-			`"src" requires value`,
+			`parsing pullquote at offset 0: "src" requires value`,
 		},
 		{
 			"unclosed escape",
 			`<!-- pullquote src="\ -->`,
 			nil,
-			errTokUnterminated.Error(),
+			fmt.Errorf("parsing pullquote at offset 0: %w", errTokUnterminated).Error(),
 		},
 		{
 			"goquote",
@@ -289,12 +309,18 @@ func Test_parseLine(t *testing.T) {
 		{
 			"goquote example",
 			`<!-- goquote .#ExampleFooBar norealign -->`,
-			&pullQuote{tagType: "go", goPath: ".#ExampleFooBar", fmt: "example", lang: "go"},
+			&pullQuote{
+				tagType:      "go",
+				goPath:       ".#ExampleFooBar",
+				fmt:          "example",
+				lang:         "go",
+				goPrintFlags: noRealignTabs,
+			},
 			"",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			pq, err := parseLine(c.line)
+			pq, err := readPullQuotes(context.Background(), strings.NewReader(c.line))
 
 			var errS string
 			if err != nil {
@@ -306,17 +332,18 @@ func Test_parseLine(t *testing.T) {
 				return
 			}
 
-			comparePQ(t, c.pq, pq)
+			comparePQ(t, "", c.line, c.pq, pq[0])
 		})
 	}
 }
 
-func Test_readPatterns(t *testing.T) {
-	for _, c := range []struct {
+func Test_readPullQuotes(t *testing.T) {
+	type testCase struct {
 		name, contents string
 		pqs            []*pullQuote
 		err            string
-	}{
+	}
+	cases := []testCase{
 		{
 			"empty",
 			``,
@@ -357,8 +384,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- /pullquote -->
 ~~~
 ` + "```" + `
-<!-- pullquote src=here1.go start=hi1 end=bye1 -->
-<!-- /pullquote -->
+<!-- pullquote src=here1.go start=hi1 end=bye1 --><!-- /pullquote -->
 `,
 			[]*pullQuote{
 				{tagType: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
@@ -370,7 +396,16 @@ func Test_readPatterns(t *testing.T) {
 			`
 <!-- pullquote src=here.go start=hi end=bye -->
 `,
-			[]*pullQuote{{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")}},
+			[]*pullQuote{
+				{
+					tagType:  "pull",
+					src:      "here.go",
+					start:    reg("hi"),
+					end:      reg("bye"),
+					startIdx: 48,
+					endIdx:   idxNoEnd,
+				},
+			},
 			"",
 		},
 		{
@@ -379,7 +414,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote src=here.go start=hi -->
 `,
 			nil,
-			"parsing line 2: \"end\" cannot be unset",
+			"validating pullquote at offset 1: \"end\" cannot be unset",
 		},
 		{
 			"missing start",
@@ -387,7 +422,7 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote src=here.go end=hi -->
 `,
 			nil,
-			"parsing line 2: \"start\" cannot be unset",
+			"validating pullquote at offset 1: \"start\" cannot be unset",
 		},
 		{
 			"missing src",
@@ -395,13 +430,88 @@ func Test_readPatterns(t *testing.T) {
 <!-- pullquote start=here.go end=hi -->
 `,
 			nil,
-			"parsing line 2: \"src\" cannot be unset",
+			"validating pullquote at offset 1: \"src\" cannot be unset",
 		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			r := strings.NewReader(c.contents)
-			pqs, err := readPullQuotes(r)
+		{
+			"markdown comment",
+			`
+<!-- pullquote src=README.md start=hello end=bye fmt=codefence lang=md -->
+` + "```" + `md
+hello
+<!-- goquote .#fooBar -->
+bye
+` + "```" + `
+<!-- /pullquote -->
+`,
+			[]*pullQuote{
+				{
+					src:     "README.md",
+					start:   reg("hello"),
+					end:     reg("bye"),
+					fmt:     "codefence",
+					lang:    "md",
+					tagType: "pull",
+				},
+			},
+			"",
+		},
+		{
+			"from readme",
+			`hello
+<!-- goquote .#ExampleFooBar -->
+Code:
+` + "```" + `go
+FooBar(i)
+` + "```" + `
+Output:
+` + "```" + `
+FooBarRan 0
+` + "```" + `
+<!-- /goquote -->
+bye
+`,
+			[]*pullQuote{{tagType: "go", goPath: ".#ExampleFooBar", fmt: fmtExample, lang: "go"}},
+			"",
+		},
+	}
 
+	if readMe := loadReadMe(t); readMe != "" {
+		cases = append(cases, testCase{
+			name:     "README.md",
+			contents: readMe,
+			pqs: []*pullQuote{
+				{goPath: "testdata/test_run/gopath#fooBar", fmt: "codefence", lang: "go", tagType: "go"},
+				{
+					src:     "testdata/test_run/gopath/README.md",
+					fmt:     "codefence",
+					lang:    "md",
+					tagType: "pull",
+					start:   reg("hello"),
+					end:     reg("bye"),
+				},
+				{
+					src:     "testdata/test_run/gopath/README.expected.md",
+					fmt:     "codefence",
+					lang:    "md",
+					tagType: "pull",
+					start:   reg("hello"),
+					end:     reg("bye"),
+				},
+				{goPath: ".#keySrc", fmt: "codefence", lang: "go", tagType: "go", goPrintFlags: includeGroup},
+				{
+					goPath:       ".#keysCommonOptional",
+					fmt:          "codefence",
+					lang:         "go",
+					tagType:      "go",
+					goPrintFlags: includeGroup,
+				},
+			},
+		})
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pqs, err := readPullQuotes(context.Background(), strings.NewReader(c.contents))
 			var errS string
 			if err != nil {
 				errS = err.Error()
@@ -413,14 +523,34 @@ func Test_readPatterns(t *testing.T) {
 			}
 
 			if len(pqs) != len(c.pqs) {
-				t.Fatalf("wanted %d pqs but got %d", len(c.pqs), len(pqs))
+				t.Fatalf("expected %d pqs but got %d", len(c.pqs), len(pqs))
 			}
 
 			for i := 0; i < len(pqs); i++ {
-				comparePQ(t, c.pqs[i], pqs[i])
+				comparePQ(t, strconv.Itoa(i), c.contents, c.pqs[i], pqs[i])
 			}
 		})
 	}
+}
+
+func loadReadMe(t *testing.T) string {
+	f, err := os.Open("README.md")
+	if os.IsNotExist(err) {
+		t.Logf("README.md does not exist; not running test")
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("unable to load README.md: %v", err)
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	b, err := ioutil.ReadAll(f)
+	if err != nil {
+		t.Fatalf("Unable to read all: %v", err)
+	}
+	return string(b)
 }
 
 func Test_expandPullQuotes(t *testing.T) {
@@ -796,57 +926,73 @@ func changeTmpDir(t *testing.T) *testDir {
 	return &testDir{tmpDir, wd}
 }
 
-func comparePQ(t *testing.T, expected, got *pullQuote) {
-	for _, comp := range []struct {
+func comparePQ(t *testing.T, label string, src string, expected, got *pullQuote) {
+	type check struct {
+		name string
 		l, r interface{}
-	}{
-		{expected.goPath, got.goPath},
-		{expected.src, got.src},
-		{expected.fmt, got.fmt},
-		{expected.lang, got.lang},
-		{expected.tagType, got.tagType},
+	}
+	checks := []check{
+		{"goPath", expected.goPath, got.goPath},
+		{"src", expected.src, got.src},
+		{"fmt", expected.fmt, got.fmt},
+		{"lang", expected.lang, got.lang},
+		{"tagType", expected.tagType, got.tagType},
 
-		{expected.endCount, got.endCount},
+		{"endCount", expected.endCount, got.endCount},
+		{"start", expected.start, got.start},
+		{"end", expected.end, got.end},
 
-		{expected.start, got.start},
-		{expected.end, got.end},
-	} {
+		{"goPrintFlags", int(expected.goPrintFlags), int(got.goPrintFlags)},
+	}
+
+	if expected.startIdx != 0 || expected.endIdx != 0 {
+		checks = append(checks, []check{
+			{"startIdx", expected.startIdx, got.startIdx},
+			{"endIdx", expected.endIdx, got.endIdx},
+		}...)
+	}
+
+	for _, comp := range checks {
 		switch v := comp.l.(type) {
 		case string:
 			if v != comp.r.(string) {
-				t.Fatalf("wanted %q but got %q", comp.l, comp.r)
+				t.Errorf("%v.%v: wanted %q but got %q", label, comp.name, comp.l, comp.r)
 			}
 		case int:
 			if v != comp.r.(int) {
-				t.Fatalf("wanted %v but got %v", comp.l, comp.r)
+				t.Errorf("%v.%v:  wanted %v but got %v", label, comp.name, comp.l, comp.r)
 			}
 		case *regexp.Regexp:
-			compareRegexps(t, v, comp.r.(*regexp.Regexp))
+			var expS, gotS string
+			if v != nil {
+				expS = v.String()
+			}
+			if r := comp.r.(*regexp.Regexp); r != nil {
+				gotS = r.String()
+			}
+			if expS != gotS {
+				t.Errorf("%v.%v: wanted %q but got %q", label, comp.name, expS, gotS)
+			}
 		default:
 			panic("unknown type")
 		}
 	}
 
-	if expected.goPath != got.goPath {
-		t.Fatalf("wanted %q but got %q", expected.goPath, got.goPath)
-	}
-	if expected.src != got.src {
-		t.Fatalf("wanted %q but got %q", expected.src, got.src)
-	}
-	compareRegexps(t, expected.start, got.start)
-	compareRegexps(t, expected.end, got.end)
-}
+	if src != "" && !(expected.startIdx != 0 || expected.endIdx != 0) {
+		src = src[:got.startIdx]
+		src = src[strings.LastIndex(src, "<!--"):]
 
-func compareRegexps(t *testing.T, expected, got *regexp.Regexp) {
-	var expS, gotS string
-	if expected != nil {
-		expS = expected.String()
-	}
-	if got != nil {
-		gotS = got.String()
-	}
-	if expS != gotS {
-		t.Fatalf("wanted %q but got %q", expS, gotS)
+		pqs, err := readPullQuotes(context.Background(), strings.NewReader(src))
+		if err != nil {
+			t.Errorf("unexpected error while loading pqs for comparison: %v", err)
+			return
+		}
+		if len(pqs) == 0 {
+			t.Errorf("expected at least one pullquote at provided offset")
+			return
+		}
+		pqs[0].startIdx, pqs[0].endIdx = 0, 0
+		comparePQ(t, label+".reloaded", "", pqs[0], got)
 	}
 }
 
@@ -875,56 +1021,238 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+type pos struct {
+	str string
+	// if start end are provided, check they match offsets returned; otherwise, check str matches offsets returned.
+	start, end int
+}
+
 func Test_tokenizingScanner(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		val  string
-		res  []string
+		res  []pos
 	}{
 		{
 			"whitespace stripped",
 			"  abc  ",
-			[]string{"abc"},
+			[]pos{{"abc", 2, 5}},
 		},
 		{
 			"quoted",
 			`  "abc ="  `,
-			[]string{`abc =`},
+			[]pos{{"abc =", 2, 9}},
 		},
 		{
 			"escaped quote",
 			`  "abc \""  `,
-			[]string{`abc "`},
+			[]pos{{`abc "`, 2, 10}},
 		},
 		{
 			"equals in the middle",
 			`  "abc \""=23  `,
-			[]string{`abc "`, `=`, `23`},
+			[]pos{{`abc "`, 2, 10}, {`=`, 10, 11}, {`23`, 11, 13}},
 		},
 		{
 			"double escape",
 			`  "abc \\"=23  `,
-			[]string{`abc \`, `=`, `23`},
+			[]pos{{`abc \`, 2, 10}, {`=`, 10, 11}, {`23`, 11, 13}},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := tokenizingScanner(strings.NewReader(tt.val))
-			var res []string
-			for sc.Scan() {
-				res = append(res, sc.Text())
-			}
-			if err := sc.Err(); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			for i, r := range tt.res {
-				if i >= len(res) {
-					t.Errorf("token %d: wanted %v but missing", i, r)
-					continue
-				}
-				if r != res[i] {
-					t.Errorf("token %d: wanted %v but got %v", i, r, res[i])
-				}
-			}
+			runScannerTest(t, tokenizingScanner(strings.NewReader(tt.val)), tt.val, tt.res)
 		})
 	}
+}
+
+func Test_htmlCommentScanner(t *testing.T) {
+	type testCase struct {
+		name string
+		val  string
+		res  []pos
+	}
+	cases := []testCase{
+		{
+			"finds",
+			`abcdef<!--1234567890-->ghj`,
+			[]pos{{str: "<!--1234567890-->"}},
+		},
+		{
+			"finds",
+			`abcdef<!--1234567890-->ghj<!--ok-->`,
+			[]pos{{str: "<!--1234567890-->"}, {str: "<!--ok-->"}},
+		},
+		{
+			"nothing between",
+			`a<!---->b`,
+			[]pos{{str: "<!---->"}},
+		},
+		{
+			"unfinished start",
+			`abcdef<!--`,
+			nil,
+		},
+		{
+			"unfinished end",
+			`abcdef<!----`,
+			nil,
+		},
+		{
+			"markdown comment",
+			`
+<!-- pullquote src=README.md start=hello end=bye fmt=codefence lang=md -->
+` + "```" + `md
+			hello
+			<!-- goquote .#fooBar -->
+			bye
+` + "```" + `
+<!-- /pullquote -->
+`,
+			[]pos{
+				{str: "<!-- pullquote src=README.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- /pullquote -->"},
+			},
+		},
+		{
+			"example",
+			`hello
+<!-- goquote .#ExampleFooBar -->
+Code:
+` + "```" + `go
+FooBar(i)
+` + "```" + `
+Output:
+` + "```" + `
+FooBarRan 0
+` + "```" + `
+<!-- /goquote -->
+bye
+`,
+			[]pos{
+				{str: "<!-- goquote .#ExampleFooBar -->"},
+				{str: "<!-- /goquote -->"},
+			},
+		},
+	}
+	if readMe := loadReadMe(t); readMe != "" {
+		cases = append(cases, testCase{
+			"README.md",
+			readMe,
+			[]pos{
+				{str: "<!-- goquote testdata/test_run/gopath#fooBar -->"},
+				{str: "<!-- /goquote -->"},
+				{str: "<!-- pullquote src=testdata/test_run/gopath/README.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- /pullquote -->"},
+				{str: "<!-- pullquote src=testdata/test_run/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- /pullquote -->"},
+				{str: "<!-- goquote .#keySrc includegroup -->"},
+				{str: "<!-- /goquote -->"},
+				{str: "<!-- goquote .#keysCommonOptional includegroup -->"},
+				{str: "<!-- /goquote -->"},
+			},
+		})
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			runScannerTest(t, htmlCommentScanner(strings.NewReader(tt.val)), tt.val, tt.res)
+		})
+	}
+}
+
+func runScannerTest(t *testing.T, sc *trackingScanner, val string, expected []pos) {
+	var res []pos
+	for sc.Scan() {
+		res = append(res, pos{sc.Text(), sc.start, sc.end})
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for i, r := range expected {
+		if i >= len(res) {
+			t.Errorf("token %d: wanted %v but missing", i, r)
+			continue
+		}
+		if r.str != res[i].str {
+			t.Errorf("token %d: wanted %v but got %v", i, r.str, res[i].str)
+		}
+		if r.start != 0 || r.end != 0 {
+			if r.start != res[i].start {
+				t.Errorf("token start %d: wanted %v but got %v", i, r.start, res[i].start)
+			}
+			if r.end != res[i].end {
+				t.Errorf("token end %d: wanted %v but got %v", i, r.end, res[i].end)
+			}
+			continue
+		}
+		if val[res[i].start:res[i].end] != res[i].str {
+			t.Errorf("expected returned indices [%d, %d) to match output but got %v", res[i].start, res[i].end,
+				res[i].str)
+		}
+	}
+	for i, r := range res {
+		if i >= len(expected) {
+			t.Errorf("token %d: got unexpected %v", i, r)
+			continue
+		}
+	}
+}
+
+func Test_filesChanged(t *testing.T) {
+	td := changeTmpDir(t)
+	defer td.Close()
+
+	var fs []*os.File
+	defer func() {
+		for _, f := range fs {
+			_ = f.Close()
+		}
+	}()
+	writeTmp := func(data string) *os.File {
+		fA, err := ioutil.TempFile(td.tmpDir, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs = append(fs, fA)
+
+		if _, err = fA.WriteString(data); err != nil {
+			t.Fatal(err)
+		}
+
+		return fA
+	}
+
+	a := writeTmp("abcdefghijklmonp")
+	b := writeTmp("abcdefghijklmonp")
+	c := writeTmp("abcdefghijklmon") // different
+
+	t.Run("identity", func(t *testing.T) {
+		changed, err := filesChanged(a, a)
+		if err != nil {
+			t.Fatalf("unexpected failure: %v", err)
+		}
+		if changed {
+			t.Fatal("Expected same file to be equal to itself")
+		}
+	})
+
+	t.Run("same contents", func(t *testing.T) {
+		changed, err := filesChanged(a, b)
+		if err != nil {
+			t.Fatalf("unexpected failure: %v", err)
+		}
+		if changed {
+			t.Fatal("Expected same contexts to be equal")
+		}
+	})
+
+	t.Run("different contents", func(t *testing.T) {
+		changed, err := filesChanged(a, c)
+		if err != nil {
+			t.Fatalf("unexpected failure: %v", err)
+		}
+		if !changed {
+			t.Fatal("Expected different contents to be unequal")
+		}
+	})
 }
