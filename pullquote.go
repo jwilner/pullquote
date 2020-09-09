@@ -228,14 +228,32 @@ func processFiles(ctx context.Context, checkMode bool, fns <-chan string) error 
 }
 
 func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-chan string, <-chan error) {
+	var (
+		errC   = make(chan error, 1)
+		merged = make(chan string, len(fns)+1)
+	)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		errC <- err // can't block
+		close(merged)
+		close(errC)
+		return merged, errC
+	}
+
 	ctx, cncl := context.WithCancel(ctx)
+	defer cncl()
 
-	errC := make(chan error, 1)
-
-	var scanned chan string
+	var (
+		wg              sync.WaitGroup
+		scanned, walked chan string
+	)
 	if r != nil {
 		scanned = make(chan string)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+
 			scanner := bufio.NewScanner(r)
 			for scanner.Scan() {
 				select {
@@ -254,11 +272,12 @@ func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-cha
 		}()
 	}
 
-	var walked chan string
 	if walk {
 		walked = make(chan string)
+		wg.Add(1)
 		go func() {
-			err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+			defer wg.Done()
+			err = filepath.Walk(wd, func(path string, info os.FileInfo, err error) error {
 				switch {
 				case err != nil:
 					return err
@@ -290,12 +309,31 @@ func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-cha
 		}()
 	}
 
-	merged := make(chan string, len(fns)+1)
-	for _, fn := range fns {
-		merged <- fn
-	}
-
 	go func() {
+		seen := make(map[string]struct{})
+
+		submit := func(path string) {
+			if _, ok := seen[path]; ok {
+				return // dupe
+			}
+			select {
+			case merged <- path:
+				seen[path] = struct{}{}
+			case <-ctx.Done():
+			}
+		}
+
+		standardize := func(path string) string {
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(wd, path)
+			}
+			return filepath.Clean(path)
+		}
+
+		for _, fn := range fns {
+			submit(standardize(fn))
+		}
+
 	SelectLoop:
 		for scanned != nil || walked != nil {
 			select {
@@ -306,17 +344,19 @@ func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-cha
 					scanned = nil
 					break
 				}
-				merged <- s
+				submit(standardize(s))
 			case s, ok := <-walked:
 				if !ok {
 					walked = nil
 					break
 				}
-				merged <- s
+				// no need to call submit here -- guaranted to be clean
+				submit(s)
 			}
 		}
+		wg.Wait()
 		close(merged)
-		close(errC) // all writes must have stopped by this point
+		close(errC)
 	}()
 
 	return merged, errC
