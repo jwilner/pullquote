@@ -17,10 +17,19 @@ import (
 
 var reg = regexp.MustCompile
 
-func Test_run(t *testing.T) {
-	entries, err := ioutil.ReadDir("testdata/test_run")
+func Test_processFiles(t *testing.T) {
+	slCh := func(sl []string) <-chan string {
+		ch := make(chan string, len(sl))
+		for _, s := range sl {
+			ch<-s
+		}
+		close(ch)
+		return ch
+	}
+
+	entries, err := ioutil.ReadDir("testdata/test_processFiles")
 	if err != nil {
-		t.Skipf("testdata/test_run not usable: %v", err)
+		t.Skipf("testdata/test_processFiles not usable: %v", err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -29,7 +38,7 @@ func Test_run(t *testing.T) {
 		if e.Name() != "multiple" {
 			continue
 		}
-		dataDir, err := filepath.Abs(filepath.Join("testdata/test_run", e.Name()))
+		dataDir, err := filepath.Abs(filepath.Join("testdata/test_processFiles", e.Name()))
 		if err != nil {
 			t.Fatalf("abs: %v", err)
 		}
@@ -83,7 +92,7 @@ func Test_run(t *testing.T) {
 			}
 
 			t.Run("first pass", func(t *testing.T) {
-				if err := run(context.Background(), false, inFiles); err != nil {
+				if err := processFiles(context.Background(), false, slCh(inFiles)); err != nil {
 					t.Fatal(err)
 				}
 				checkEqual(t)
@@ -94,7 +103,7 @@ func Test_run(t *testing.T) {
 			}
 
 			t.Run("idempotent", func(t *testing.T) {
-				if err := run(context.Background(), false, inFiles); err != nil {
+				if err := processFiles(context.Background(), false, slCh(inFiles)); err != nil {
 					t.Fatal(err)
 				}
 				checkEqual(t)
@@ -480,9 +489,9 @@ bye
 			name:     "README.md",
 			contents: readMe,
 			pqs: []*pullQuote{
-				{goPath: "testdata/test_run/gopath#fooBar", fmt: "codefence", lang: "go", tagType: "go"},
+				{goPath: "testdata/test_processFiles/gopath#fooBar", fmt: "codefence", lang: "go", tagType: "go"},
 				{
-					src:     "testdata/test_run/gopath/README.md",
+					src:     "testdata/test_processFiles/gopath/README.md",
 					fmt:     "codefence",
 					lang:    "md",
 					tagType: "pull",
@@ -490,7 +499,7 @@ bye
 					end:     reg("bye"),
 				},
 				{
-					src:     "testdata/test_run/gopath/README.expected.md",
+					src:     "testdata/test_processFiles/gopath/README.expected.md",
 					fmt:     "codefence",
 					lang:    "md",
 					tagType: "pull",
@@ -1139,11 +1148,11 @@ bye
 			"README.md",
 			readMe,
 			[]pos{
-				{str: "<!-- goquote testdata/test_run/gopath#fooBar -->"},
+				{str: "<!-- goquote testdata/test_processFiles/gopath#fooBar -->"},
 				{str: "<!-- /goquote -->"},
-				{str: "<!-- pullquote src=testdata/test_run/gopath/README.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- pullquote src=testdata/test_processFiles/gopath/README.md start=hello end=bye fmt=codefence lang=md -->"},
 				{str: "<!-- /pullquote -->"},
-				{str: "<!-- pullquote src=testdata/test_run/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- pullquote src=testdata/test_processFiles/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->"},
 				{str: "<!-- /pullquote -->"},
 				{str: "<!-- goquote .#keySrc includegroup -->"},
 				{str: "<!-- /goquote -->"},

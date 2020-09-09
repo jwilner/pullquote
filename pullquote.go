@@ -35,39 +35,89 @@ func main() {
 	}
 
 	checkMode := flag.Bool("check", false, "whether to run in check mode")
+	walk := flag.Bool("walk", false, "whether to automatically discover all targets")
 
 	flag.Parse()
 
-	args := flag.Args()
-	fns := make([]string, len(args))
-	copy(fns, args)
-
 	// add in stdin if present
+	var r io.Reader
 	if stat, _ := os.Stdin.Stat(); stat != nil && stat.Mode()&os.ModeCharDevice == 0 {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			fns = append(fns, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			logger.Fatalf("err=%q", err)
-		}
+		r = os.Stdin
 	}
 
-	ctx, cncl := signalCtx()
-	defer cncl()
-	if err := run(ctx, *checkMode, fns); err != nil {
-		cncl()
+	err := func() error {
+		ctx, cncl := signalCtx()
+		defer cncl()
+		return run(ctx, flag.Args(), r, *walk, *checkMode)
+	}()
 
-		if !errors.Is(err, errCheckMode) {
-			logger.Fatalf("err=%q", err)
-		}
-
+	switch {
+	case errors.Is(err, errCheckMode):
 		logger.Println(`msg="changes detected"`)
 		os.Exit(2)
-	}
-	if *checkMode {
+
+	case err != nil:
+		logger.Fatalf("err=%q", err)
+
+	case *checkMode:
 		logger.Println(`msg="no changes detected"`)
 	}
+}
+
+func run(ctx context.Context, fns []string, r io.Reader, walk, checkMode bool) error {
+	ctx, cncl := context.WithCancel(ctx)
+	defer cncl()
+
+	fileC, errC := listFiles(ctx, fns, r, walk)
+
+	var (
+		wg               sync.WaitGroup
+		listErr, procErr error
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		select {
+		case listErr = <-errC:
+			if listErr != nil {
+				cncl()
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if procErr = processFiles(ctx, checkMode, fileC); procErr != nil {
+			cncl()
+		}
+	}()
+
+	wg.Wait()
+
+	// prefer non-contextual errors for reporting if present
+	var retErr error
+	for _, e := range [...]error{listErr, procErr} {
+		if e != nil && !errors.Is(e, context.Canceled) {
+			retErr = e
+			break
+		}
+	}
+	if retErr == nil {
+		retErr = ctx.Err()
+	}
+
+	// log if failed for other reasons
+	if listErr != nil && errors.Unwrap(retErr) != errors.Unwrap(listErr) {
+		logger.Printf(`msg="listing files failed" err=%q`, listErr)
+	}
+	if procErr != nil && errors.Unwrap(retErr) != errors.Unwrap(procErr) {
+		logger.Printf(`msg="processing files failed" err=%q`, procErr)
+	}
+	return retErr
 }
 
 func signalCtx() (context.Context, context.CancelFunc) {
@@ -88,11 +138,7 @@ func signalCtx() (context.Context, context.CancelFunc) {
 
 var errCheckMode = errors.New("files changed")
 
-func run(ctx context.Context, checkMode bool, fns []string) error {
-	if len(fns) == 0 {
-		return errors.New("no files provided")
-	}
-
+func processFiles(ctx context.Context, checkMode bool, fns <-chan string) error {
 	tmpDir, err := ioutil.TempDir("", "pullquote")
 	if err != nil {
 		return fmt.Errorf("unable to open temp directory: %w", err)
@@ -107,42 +153,65 @@ func run(ctx context.Context, checkMode bool, fns []string) error {
 		err    error
 	}
 
-	var resultCh = make(chan result, len(fns))
-	for _, fn := range fns {
-		go func(fn string) {
-			tempFn, err := processFile(ctx, tmpDir, fn)
-			resultCh <- result{fn, tempFn, err}
-		}(fn)
-	}
+	processCtx, processCncl := context.WithCancel(ctx)
+	defer processCncl()
 
 	var (
-		errFn  string
-		others int
-		moves  [][2]string
+		resultCh = make(chan result, 1)
+		inFlight int
+
+		// err msging equipment
+		otherErrs int
+		errFn     string
+
+		// moves to make
+		moves [][2]string
 	)
-	for i, res := len(fns)-1, <-resultCh; i >= 0; i-- {
-		if debug && res.err != nil {
-			logger.Printf("file=%q err=%q", res.fn, res.err)
-		}
-		if err != nil {
-			if res.err != nil {
-				others++
+
+	// we eschew the need for a waitgroup here by just tracking the number in flight
+	for fns != nil || inFlight > 0 {
+		select {
+
+		case <-ctx.Done():
+			err = ctx.Err()
+			fns = nil
+
+		case fn, ok := <-fns:
+			if !ok {
+				fns = nil
+				break
 			}
-			continue
+			inFlight++
+			go func(fn string) {
+				tempFn, err := processFile(processCtx, tmpDir, fn)
+				select {
+				case resultCh <- result{fn, tempFn, err}:
+				case <-processCtx.Done():
+				}
+			}(fn)
+
+		case res := <-resultCh:
+			inFlight--
+
+			switch {
+
+			case err == nil && res.err == nil: // happy path
+				if res.tempFn != "" {
+					moves = append(moves, [2]string{res.tempFn, res.fn})
+				}
+
+			case res.err != nil && !errors.Is(res.err, context.Canceled): // ignore canceled ctx for per-file reporting
+				logger.Printf("file=%q err=%q", res.fn, res.err)
+				otherErrs++
+				if err == nil || res.fn < errFn {
+					err, errFn = res.err, res.fn // take the "minimum" for deterministic results
+				}
+			}
 		}
-		if res.err != nil {
-			err = res.err
-			errFn = res.fn
-			continue
-		}
-		if res.tempFn == "" {
-			continue
-		}
-		moves = append(moves, [2]string{res.tempFn, res.fn})
 	}
 	if err != nil {
-		if others > 0 {
-			return fmt.Errorf("%v failed (along with %v others): %w", errFn, others, err)
+		if otherErrs > 0 {
+			return fmt.Errorf("%v failed (along with %v others): %w", errFn, otherErrs, err)
 		}
 		return fmt.Errorf("%v failed: %w", errFn, err)
 	}
@@ -154,7 +223,103 @@ func run(ctx context.Context, checkMode bool, fns []string) error {
 			return fmt.Errorf("os.Rename(%v, %v): %w", m[0], m[1], err)
 		}
 	}
+	logger.Printf(`msg="processing complete" files_updated=%d`, len(moves))
 	return nil
+}
+
+func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-chan string, <-chan error) {
+	ctx, cncl := context.WithCancel(ctx)
+
+	errC := make(chan error, 1)
+
+	var scanned chan string
+	if r != nil {
+		scanned = make(chan string)
+		go func() {
+			scanner := bufio.NewScanner(r)
+			for scanner.Scan() {
+				select {
+				case scanned <- scanner.Text():
+				case <-ctx.Done():
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				cncl()
+				select {
+				case errC <- err:
+				default:
+				}
+			}
+			close(scanned)
+		}()
+	}
+
+	var walked chan string
+	if walk {
+		walked = make(chan string)
+		go func() {
+			err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+				switch {
+				case err != nil:
+					return err
+				case info.IsDir():
+					// skip hidden dirs and conventionally excluded go dirs
+					if name := info.Name(); name != "." && (strings.HasPrefix(name, ".") || name == "testdata") {
+						return filepath.SkipDir
+					}
+					return nil
+				case strings.ToLower(filepath.Ext(path)) != ".md":
+					return nil
+				default:
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case walked <- path:
+						return nil
+					}
+				}
+			})
+			if err != nil {
+				cncl()
+				select {
+				case errC <- err:
+				default:
+				}
+			}
+			close(walked)
+		}()
+	}
+
+	merged := make(chan string, len(fns)+1)
+	for _, fn := range fns {
+		merged <- fn
+	}
+
+	go func() {
+	SelectLoop:
+		for scanned != nil || walked != nil {
+			select {
+			case <-ctx.Done():
+				break SelectLoop
+			case s, ok := <-scanned:
+				if !ok {
+					scanned = nil
+					break
+				}
+				merged <- s
+			case s, ok := <-walked:
+				if !ok {
+					walked = nil
+					break
+				}
+				merged <- s
+			}
+		}
+		close(merged)
+		close(errC) // all writes must have stopped by this point
+	}()
+
+	return merged, errC
 }
 
 var msgKey = func() interface{} { // lawl
@@ -260,7 +425,9 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 		ctxLogf(ctx, `msg="change detected"`)
 		return o.Name(), nil
 	default:
-		ctxLogf(ctx, `msg="no change detected"`)
+		if debug {
+			ctxLogf(ctx, `msg="no change detected"`)
+		}
 		return "", nil
 	}
 }

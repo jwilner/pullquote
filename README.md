@@ -7,7 +7,7 @@ A simple documentation tool that keeps quotes or snippets in your docs up-to-dat
 ## Example
 
 Given a piece of code to document like:
-<!-- goquote testdata/test_run/gopath#fooBar -->
+<!-- goquote testdata/test_processFiles/gopath#fooBar -->
 ```go
 // fooBar does some stuff
 func fooBar() {
@@ -17,7 +17,7 @@ func fooBar() {
 <!-- /goquote -->
 
 - Insert a `pullquote` tag in your doc:
-<!-- pullquote src=testdata/test_run/gopath/README.md start=hello end=bye fmt=codefence lang=md -->
+<!-- pullquote src=testdata/test_processFiles/gopath/README.md start=hello end=bye fmt=codefence lang=md -->
 ```md
 hello
 <!-- goquote .#fooBar -->
@@ -31,7 +31,7 @@ pullquote doc.md
 ```
 
 - `pullquote` adds in the snippet styled the way you expect.
-<!-- pullquote src=testdata/test_run/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
+<!-- pullquote src=testdata/test_processFiles/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
 ~~~md
 hello
 <!-- goquote .#fooBar -->

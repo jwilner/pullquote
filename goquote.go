@@ -18,12 +18,16 @@ import (
 
 const parseMode = parser.ParseComments
 
-func parseFile(fSet *token.FileSet, pat string) ([]*ast.File, error) {
+func parseFile(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.File, error) {
 	file, err := parser.ParseFile(fSet, pat, nil, parseMode)
 	if err != nil {
 		return nil, err
 	}
-	return []*ast.File{file}, nil
+	files := []*ast.File{file}
+	if debug {
+		logLoadedFiles(addLogCtx(ctx, `load_mechanism="dir" gopath=%q`, pat), fSet, files)
+	}
+	return files, nil
 }
 
 func parsePackage(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.File, error) {
@@ -44,10 +48,27 @@ func parsePackage(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.
 	for _, pkg := range pkgs {
 		syntax = append(syntax, pkg.Syntax...)
 	}
+	if debug {
+		logLoadedFiles(addLogCtx(ctx, `load_mechanism="packages" gopath=%q`, pat), fSet, syntax)
+	}
 	return syntax, nil
 }
 
-func parseDir(fSet *token.FileSet, pat string) ([]*ast.File, error) {
+func commonPrefix(terms []string) string {
+	if !sort.StringsAreSorted(terms) {
+		cp := make([]string, len(terms))
+		copy(cp, terms)
+		terms = cp
+	}
+	min, max := []rune(terms[0]), []rune(terms[len(terms)-1])
+	var i int
+	for i < len(min) && i < len(max) && min[i] != max[i] {
+		i++
+	}
+	return string(min[:i])
+}
+
+func parseDir(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.File, error) {
 	pkgs, err := parser.ParseDir(fSet, pat, nil, parseMode)
 	if err != nil {
 		return nil, err
@@ -67,8 +88,31 @@ func parseDir(fSet *token.FileSet, pat string) ([]*ast.File, error) {
 			files = append(files, f)
 		}
 	}
-
+	if debug {
+		logLoadedFiles(addLogCtx(ctx, `load_mechanism="dir" gopath=%q`, pat), fSet, files)
+	}
 	return files, nil
+}
+
+func logLoadedFiles(ctx context.Context, fSet *token.FileSet, files []*ast.File) {
+	fns := make([]string, 0, len(files))
+	for _, f := range files {
+		fns = append(fns, fSet.Position(f.Pos()).Filename)
+	}
+	sort.Strings(fns)
+
+	switch len(fns) {
+	case 0:
+		ctxLogf(ctx, `files_found=0`)
+	case 1:
+		ctxLogf(ctx, `files_found=1 files=%q`, fns[0])
+	default:
+		prefix := commonPrefix(fns)
+		for i := range fns {
+			fns[i] = fns[i][len(prefix):]
+		}
+		ctxLogf(ctx, `files_found=%d files=%v{%v}`, len(fns), prefix, strings.Join(fns, ","))
+	}
 }
 
 func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) {
@@ -84,9 +128,9 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) 
 			err   error
 		)
 		if strings.HasSuffix(pat, ".go") {
-			files, err = parseFile(fSet, pat)
+			files, err = parseFile(ctx, fSet, pat)
 		} else if files, err = parsePackage(ctx, fSet, pat); err == nil && len(files) == 0 {
-			files, err = parseDir(fSet, pat)
+			files, err = parseDir(ctx, fSet, pat)
 		}
 
 		s, err := sprintNodeWithName(fSet, files, sym, pq.goPrintFlags, pq.fmt == fmtExample)
@@ -99,7 +143,13 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) 
 	return res, nil
 }
 
-func sprintNodeWithName(fSet *token.FileSet, files []*ast.File, name string, flags goPrintFlag, example bool) (*expanded, error) {
+func sprintNodeWithName(
+	fSet *token.FileSet,
+	files []*ast.File,
+	name string,
+	flags goPrintFlag,
+	example bool,
+) (*expanded, error) {
 	for _, f := range files {
 		var (
 			found []byte
