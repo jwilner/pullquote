@@ -55,17 +55,23 @@ func parsePackage(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.
 }
 
 func commonPrefix(terms []string) string {
-	if !sort.StringsAreSorted(terms) {
-		cp := make([]string, len(terms))
-		copy(cp, terms)
-		terms = cp
+	var min, max string
+	for _, t := range terms {
+		if min == "" || t < min {
+			min = t
+		}
+		if max == "" || t > max {
+			max = t
+		}
 	}
-	min, max := []rune(terms[0]), []rune(terms[len(terms)-1])
+
+	minR, maxR := []rune(min), []rune(max)
 	var i int
-	for i < len(min) && i < len(max) && min[i] != max[i] {
+	for i < len(minR) && i < len(maxR) && minR[i] == maxR[i] {
 		i++
 	}
-	return string(min[:i])
+
+	return min[:i]
 }
 
 func parseDir(ctx context.Context, fSet *token.FileSet, pat string) ([]*ast.File, error) {
@@ -99,7 +105,6 @@ func logLoadedFiles(ctx context.Context, fSet *token.FileSet, files []*ast.File)
 	for _, f := range files {
 		fns = append(fns, fSet.Position(f.Pos()).Filename)
 	}
-	sort.Strings(fns)
 
 	switch len(fns) {
 	case 0:
@@ -111,6 +116,7 @@ func logLoadedFiles(ctx context.Context, fSet *token.FileSet, files []*ast.File)
 		for i := range fns {
 			fns[i] = fns[i][len(prefix):]
 		}
+		sort.Strings(fns)
 		ctxLogf(ctx, `files_found=%d files=%v{%v}`, len(fns), prefix, strings.Join(fns, ","))
 	}
 }
