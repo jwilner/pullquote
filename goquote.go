@@ -138,6 +138,9 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) 
 		} else if files, err = parsePackage(ctx, fSet, pat); err == nil && len(files) == 0 {
 			files, err = parseDir(ctx, fSet, pat)
 		}
+		if err != nil {
+			return nil, err
+		}
 
 		s, err := sprintNodeWithName(fSet, files, sym, pq.flags, pq.fmt == fmtExample)
 		if err != nil {

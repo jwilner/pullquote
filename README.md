@@ -1,4 +1,7 @@
 [![Tests](https://github.com/jwilner/pullquote/workflows/tests/badge.svg)](https://github.com/jwilner/pullquote/workflows/)
+[![Lint](https://github.com/jwilner/pullquote/workflows/lint/badge.svg)](https://github.com/jwilner/pullquote/actions?query=workflow%3Alint+branch%3Amain)
+[![GoDoc](https://godoc.org/github.com/jwilner/pullquote?status.svg)](https://godoc.org/github.com/jwilner/pullquote)
+
 
 # pullquote
 
