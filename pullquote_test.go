@@ -21,7 +21,7 @@ func Test_processFiles(t *testing.T) {
 	slCh := func(sl []string) <-chan string {
 		ch := make(chan string, len(sl))
 		for _, s := range sl {
-			ch<-s
+			ch <- s
 		}
 		close(ch)
 		return ch
@@ -33,9 +33,6 @@ func Test_processFiles(t *testing.T) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
-			continue
-		}
-		if e.Name() != "multiple" {
 			continue
 		}
 		dataDir, err := filepath.Abs(filepath.Join("testdata/test_processFiles", e.Name()))
@@ -228,55 +225,55 @@ func Test_parseLine(t *testing.T) {
 		{
 			"unquoted src",
 			"<!-- pullquote src=hi start=a end=b -->",
-			&pullQuote{tagType: "pull", src: "hi", start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: "hi", start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"quoted src",
 			`<!-- pullquote src="hi" start=a end=b -->`,
-			&pullQuote{tagType: "pull", src: "hi", start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: "hi", start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped src",
 			`<!-- pullquote src="hi\\" start=a end=b -->`,
-			&pullQuote{tagType: "pull", src: `hi\`, start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: `hi\`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src",
 			`<!-- pullquote src="h \"" start=a end=b -->`,
-			&pullQuote{tagType: "pull", src: `h "`, start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: `h "`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src middle",
 			`<!-- pullquote src="h\"here" start=a end=b -->`,
-			&pullQuote{tagType: "pull", src: `h"here`, start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: `h"here`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"escaped quote src middle multi backslash",
 			`<!-- pullquote src="h\\\"here" start=a end=b -->`,
-			&pullQuote{tagType: "pull", src: `h\"here`, start: reg("a"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: `h\"here`, start: reg("a"), end: reg("b")},
 			"",
 		},
 		{
 			"start",
 			`<!-- pullquote src="here" start=hi end=b -->`,
-			&pullQuote{tagType: "pull", src: `here`, start: reg("hi"), end: reg("b")},
+			&pullQuote{originalTag: "pull", src: `here`, start: reg("hi"), end: reg("b")},
 			"",
 		},
 		{
 			"here end",
 			`<!-- pullquote src="here.go" start="hi" end=bye -->`,
-			&pullQuote{tagType: "pull", src: `here.go`, start: reg("hi"), end: reg("bye")},
+			&pullQuote{originalTag: "pull", src: `here.go`, start: reg("hi"), end: reg("bye")},
 			"",
 		},
 		{
 			"no quotes",
 			`<!-- pullquote src=here.go start=hi end=bye fmt=codefence -->`,
-			&pullQuote{tagType: "pull", src: `here.go`, start: reg("hi"), end: reg("bye"), fmt: "codefence"},
+			&pullQuote{originalTag: "pull", src: `here.go`, start: reg("hi"), end: reg("bye"), fmt: "codefence"},
 			"",
 		},
 		{
@@ -300,30 +297,50 @@ func Test_parseLine(t *testing.T) {
 		{
 			"goquote",
 			`<!-- goquote .#Foo -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go"},
+			&pullQuote{originalTag: "go", quoteType: "go", objPath: ".#Foo", fmt: "codefence", lang: "go"},
 			"",
 		},
 		{
 			"goquote quoted",
 			`<!-- goquote ".#Foo" -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go"},
+			&pullQuote{originalTag: "go", quoteType: "go", objPath: ".#Foo", fmt: "codefence", lang: "go"},
 			"",
 		},
 		{
-			"goquote flag norealign",
-			`<!-- goquote .#Foo norealign -->`,
-			&pullQuote{tagType: "go", goPath: ".#Foo", fmt: "codefence", lang: "go", goPrintFlags: noRealignTabs},
+			"goquote flag noreformat",
+			`<!-- goquote .#Foo noreformat -->`,
+			&pullQuote{
+				originalTag: "go",
+				quoteType:   "go",
+				objPath:     ".#Foo",
+				fmt:         "codefence",
+				lang:        "go",
+				flags:       noRealignTabs,
+			},
 			"",
 		},
 		{
 			"goquote example",
-			`<!-- goquote .#ExampleFooBar norealign -->`,
+			`<!-- goquote .#ExampleFooBar noreformat -->`,
 			&pullQuote{
-				tagType:      "go",
-				goPath:       ".#ExampleFooBar",
-				fmt:          "example",
-				lang:         "go",
-				goPrintFlags: noRealignTabs,
+				quoteType:   "go",
+				originalTag: "go",
+				objPath:     ".#ExampleFooBar",
+				fmt:         "example",
+				lang:        "go",
+				flags:       noRealignTabs,
+			},
+			"",
+		},
+		{
+			"jsonquote example",
+			`<!-- jsonquote foo/bar#/biz/0/baz -->`,
+			&pullQuote{
+				quoteType:   "json",
+				originalTag: "json",
+				objPath:     "foo/bar#/biz/0/baz",
+				fmt:         "codefence",
+				lang:        "json",
 			},
 			"",
 		},
@@ -366,7 +383,7 @@ func Test_readPullQuotes(t *testing.T) {
 <!-- /pullquote -->
 `,
 			[]*pullQuote{
-				{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
+				{originalTag: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
 			},
 			"",
 		},
@@ -379,8 +396,8 @@ func Test_readPullQuotes(t *testing.T) {
 <!-- /pullquote -->
 `,
 			[]*pullQuote{
-				{tagType: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
-				{tagType: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
+				{originalTag: "pull", src: "here.go", start: reg("hi"), end: reg("bye")},
+				{originalTag: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
 			},
 			"",
 		},
@@ -396,7 +413,7 @@ func Test_readPullQuotes(t *testing.T) {
 <!-- pullquote src=here1.go start=hi1 end=bye1 --><!-- /pullquote -->
 `,
 			[]*pullQuote{
-				{tagType: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
+				{originalTag: "pull", src: "here1.go", start: reg("hi1"), end: reg("bye1")},
 			},
 			"",
 		},
@@ -407,12 +424,12 @@ func Test_readPullQuotes(t *testing.T) {
 `,
 			[]*pullQuote{
 				{
-					tagType:  "pull",
-					src:      "here.go",
-					start:    reg("hi"),
-					end:      reg("bye"),
-					startIdx: 48,
-					endIdx:   idxNoEnd,
+					originalTag: "pull",
+					src:         "here.go",
+					start:       reg("hi"),
+					end:         reg("bye"),
+					startIdx:    48,
+					endIdx:      idxNoEnd,
 				},
 			},
 			"",
@@ -454,12 +471,12 @@ bye
 `,
 			[]*pullQuote{
 				{
-					src:     "README.md",
-					start:   reg("hello"),
-					end:     reg("bye"),
-					fmt:     "codefence",
-					lang:    "md",
-					tagType: "pull",
+					src:         "README.md",
+					start:       reg("hello"),
+					end:         reg("bye"),
+					fmt:         "codefence",
+					lang:        "md",
+					originalTag: "pull",
 				},
 			},
 			"",
@@ -479,7 +496,9 @@ FooBarRan 0
 <!-- /goquote -->
 bye
 `,
-			[]*pullQuote{{tagType: "go", goPath: ".#ExampleFooBar", fmt: fmtExample, lang: "go"}},
+			[]*pullQuote{
+				{quoteType: "go", originalTag: "go", objPath: ".#ExampleFooBar", fmt: fmtExample, lang: "go"},
+			},
 			"",
 		},
 	}
@@ -489,30 +508,52 @@ bye
 			name:     "README.md",
 			contents: readMe,
 			pqs: []*pullQuote{
-				{goPath: "testdata/test_processFiles/gopath#fooBar", fmt: "codefence", lang: "go", tagType: "go"},
 				{
-					src:     "testdata/test_processFiles/gopath/README.md",
-					fmt:     "codefence",
-					lang:    "md",
-					tagType: "pull",
-					start:   reg("hello"),
-					end:     reg("bye"),
+					quoteType:   "go",
+					objPath:     "testdata/test_processFiles/gopath#fooBar",
+					fmt:         "codefence",
+					lang:        "go",
+					originalTag: "go",
 				},
 				{
-					src:     "testdata/test_processFiles/gopath/README.expected.md",
-					fmt:     "codefence",
-					lang:    "md",
-					tagType: "pull",
-					start:   reg("hello"),
-					end:     reg("bye"),
+					src:         "testdata/test_processFiles/gopath/README.md",
+					fmt:         "codefence",
+					lang:        "md",
+					originalTag: "pull",
+					start:       reg("hello"),
+					end:         reg("bye"),
 				},
-				{goPath: ".#keySrc", fmt: "codefence", lang: "go", tagType: "go", goPrintFlags: includeGroup},
 				{
-					goPath:       ".#keysCommonOptional",
-					fmt:          "codefence",
-					lang:         "go",
-					tagType:      "go",
-					goPrintFlags: includeGroup,
+					src:         "testdata/test_processFiles/gopath/README.expected.md",
+					fmt:         "codefence",
+					lang:        "md",
+					originalTag: "pull",
+					start:       reg("hello"),
+					end:         reg("bye"),
+				},
+				{
+					src:         "testdata/test_processFiles/jsonpath/README.expected.md",
+					fmt:         "codefence",
+					lang:        "md",
+					originalTag: "pull",
+					start:       reg("hello"),
+					end:         reg("bye"),
+				},
+				{
+					quoteType:   "go",
+					objPath:     ".#keySrc",
+					fmt:         "codefence",
+					lang:        "go",
+					originalTag: "go",
+					flags:       includeGroup,
+				},
+				{
+					quoteType:   "go",
+					objPath:     ".#keysCommonOptional",
+					fmt:         "codefence",
+					lang:        "go",
+					originalTag: "go",
+					flags:       includeGroup,
 				},
 			},
 		})
@@ -693,7 +734,7 @@ func fooBar() {
 }
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#fooBar"},
+				{quoteType: "go", objPath: "local.go#fooBar"},
 			},
 			[]string{"// doc comment\nfunc fooBar() {\n\t// OK COOL\n\tfmt.Println(\"nice\")\n}"},
 			"",
@@ -719,7 +760,7 @@ type (
 )
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#Foo"},
+				{quoteType: "go", objPath: "local.go#Foo"},
 			},
 
 			[]string{
@@ -747,7 +788,7 @@ const (
 
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#Foo"},
+				{quoteType: "go", objPath: "local.go#Foo"},
 			},
 			[]string{
 				`// Foo does some important things
@@ -770,7 +811,7 @@ const (
 
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#Foo", goPrintFlags: includeGroup},
+				{quoteType: "go", objPath: "local.go#Foo", flags: includeGroup},
 			},
 			[]string{
 				`// a bunch of great stuff
@@ -787,7 +828,7 @@ const (
 			"my/path.go",
 			[][2]string{},
 			[]*pullQuote{
-				{goPath: "errors#New"},
+				{quoteType: "go", objPath: "errors#New"},
 			},
 			[]string{"// New returns an error that formats as the given text.\n// Each call to New returns a distinct error value even if the text is identical.\nfunc New(text string) error {\n\treturn &errorString{text}\n}"},
 			"",
@@ -806,7 +847,7 @@ func fooBar() {
 }
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#a"},
+				{quoteType: "go", objPath: "local.go#a"},
 			},
 			[]string{"a := 23"},
 			"",
@@ -821,7 +862,7 @@ func fooBar() {
 var blah int
 `}},
 			[]*pullQuote{
-				{goPath: "local.go#blah"},
+				{quoteType: "go", objPath: "local.go#blah"},
 			},
 			[]string{
 				`// blah means nothing
@@ -841,7 +882,7 @@ func fooBar() {
 }
 `}},
 			[]*pullQuote{
-				{goPath: "./#a"},
+				{quoteType: "go", objPath: "./#a"},
 			},
 			[]string{
 				`// const blah
@@ -861,8 +902,8 @@ const a int = 23`,
 				if pq.src != "" {
 					pq.src = filepath.Join(filepath.Dir(c.fn), pq.src)
 				}
-				if pq.goPath != "" && strings.HasPrefix(pq.goPath, "./") || strings.Contains(pq.goPath, ".go") {
-					pq.goPath = filepath.Join(filepath.Dir(c.fn), pq.goPath)
+				if pq.objPath != "" && strings.HasPrefix(pq.objPath, "./") || strings.Contains(pq.objPath, ".go") {
+					pq.objPath = filepath.Join(filepath.Dir(c.fn), pq.objPath)
 				}
 			}
 			res, err := expandPullQuotes(context.Background(), c.pqs)
@@ -941,17 +982,19 @@ func comparePQ(t *testing.T, label string, src string, expected, got *pullQuote)
 		l, r interface{}
 	}
 	checks := []check{
-		{"goPath", expected.goPath, got.goPath},
+		{"quoteType", expected.quoteType, got.quoteType},
+		{"originalTag", expected.originalTag, got.originalTag},
+
+		{"objPath", expected.objPath, got.objPath},
 		{"src", expected.src, got.src},
 		{"fmt", expected.fmt, got.fmt},
 		{"lang", expected.lang, got.lang},
-		{"tagType", expected.tagType, got.tagType},
 
 		{"endCount", expected.endCount, got.endCount},
 		{"start", expected.start, got.start},
 		{"end", expected.end, got.end},
 
-		{"goPrintFlags", int(expected.goPrintFlags), int(got.goPrintFlags)},
+		{"flags", int(expected.flags), int(got.flags)},
 	}
 
 	if expected.startIdx != 0 || expected.endIdx != 0 {
@@ -1153,6 +1196,8 @@ bye
 				{str: "<!-- pullquote src=testdata/test_processFiles/gopath/README.md start=hello end=bye fmt=codefence lang=md -->"},
 				{str: "<!-- /pullquote -->"},
 				{str: "<!-- pullquote src=testdata/test_processFiles/gopath/README.expected.md start=hello end=bye fmt=codefence lang=md -->"},
+				{str: "<!-- /pullquote -->"},
+				{str: "<!-- pullquote src=testdata/test_processFiles/jsonpath/README.expected.md start=hello end=bye fmt=codefence lang=md -->"},
 				{str: "<!-- /pullquote -->"},
 				{str: "<!-- goquote .#keySrc includegroup -->"},
 				{str: "<!-- /goquote -->"},

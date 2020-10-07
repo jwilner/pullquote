@@ -1,12 +1,12 @@
 hello
 <!-- goquote .#ExampleFooBar -->
-Code:
+**Code**:
 ```go
 for i := 0; i < 5; i++ {
 	FooBar(i)
 }
 ```
-Output:
+**Output**:
 ```
 FooBarRan 0
 FooBarRan 1

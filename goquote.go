@@ -126,7 +126,7 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) 
 	for _, pq := range pqs {
 		fSet := token.NewFileSet()
 
-		parts := strings.SplitN(pq.goPath, "#", 2)
+		parts := strings.SplitN(pq.objPath, "#", 2)
 		pat, sym := parts[0], parts[1]
 
 		var (
@@ -139,7 +139,7 @@ func expandGoQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error) 
 			files, err = parseDir(ctx, fSet, pat)
 		}
 
-		s, err := sprintNodeWithName(fSet, files, sym, pq.goPrintFlags, pq.fmt == fmtExample)
+		s, err := sprintNodeWithName(fSet, files, sym, pq.flags, pq.fmt == fmtExample)
 		if err != nil {
 			return nil, fmt.Errorf("error within %v: %w", pat, err)
 		}
@@ -153,7 +153,7 @@ func sprintNodeWithName(
 	fSet *token.FileSet,
 	files []*ast.File,
 	name string,
-	flags goPrintFlag,
+	flags uint,
 	example bool,
 ) (*expanded, error) {
 	for _, f := range files {

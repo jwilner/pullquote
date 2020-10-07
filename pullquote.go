@@ -422,8 +422,8 @@ func processFile(ctx context.Context, tmpDir, fn string) (string, error) {
 		if pq.src != "" {
 			pq.src = filepath.Join(dir, pq.src)
 		}
-		if pq.goPath != "" && (strings.HasPrefix(pq.goPath, "./") || strings.Contains(pq.goPath, ".go")) {
-			pq.goPath = filepath.Join(dir, pq.goPath)
+		if pq.objPath != "" && (strings.HasPrefix(pq.objPath, "./") || strings.Contains(pq.objPath, ".go")) {
+			pq.objPath = filepath.Join(dir, pq.objPath)
 		}
 	}
 
@@ -568,9 +568,9 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r readerAtSeeker, w
 				writeCodeFence(exp.String, pq.lang)
 				break
 			}
-			write("\nCode:")
+			write("\n**Code**:")
 			writeCodeFence(exp.Parts[0], pq.lang)
-			write("Output:")
+			write("**Output**:")
 			writeCodeFence(exp.Parts[1], "")
 		case fmtCodeFence:
 			writeCodeFence(exp.String, pq.lang)
@@ -582,7 +582,7 @@ func applyPullQuotes(pqs []*pullQuote, expanded []*expanded, r readerAtSeeker, w
 		}
 
 		if pq.endIdx == idxNoEnd { // add an end tag
-			write("<!-- /" + pq.tagType + "quote -->")
+			write("<!-- /" + pq.originalTag + "quote -->")
 		} else {
 			readThrough = pq.endIdx // skip any intervening content -- we have rewritten it
 		}
@@ -619,8 +619,10 @@ func readPullQuotes(ctx context.Context, r io.Reader) ([]*pullQuote, error) {
 			tt = "pull"
 		case "goquote":
 			tt = "go"
-		case "/pullquote", "/goquote":
-			if l := len(pqs) - 1; l >= 0 && pqs[l].endIdx == idxNoEnd && strings.HasPrefix(t, "/"+pqs[l].tagType) {
+		case "jsonquote":
+			tt = "json"
+		case "/pullquote", "/goquote", "/jsonquote":
+			if l := len(pqs) - 1; l >= 0 && pqs[l].endIdx == idxNoEnd && strings.HasPrefix(t, "/"+pqs[l].originalTag) {
 				pqs[l].endIdx = comments.start
 				if debug {
 					ctxLogf(ctx, `msg="found pullquote end" pq=%q`, pqs[l])
@@ -635,8 +637,8 @@ func readPullQuotes(ctx context.Context, r io.Reader) ([]*pullQuote, error) {
 			continue
 		}
 
-		pq := pullQuote{tagType: tt, startIdx: comments.end, endIdx: idxNoEnd}
-		seen, err := setOptions(&pq, toks)
+		pq := pullQuote{originalTag: tt, startIdx: comments.end, endIdx: idxNoEnd}
+		seen, err := setOptions(&pq, toks, tt)
 		if err != nil {
 			return nil, fmt.Errorf("parsing pullquote at offset %v: %w", comments.start, err)
 		}
@@ -665,25 +667,35 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error
 
 	var buf []*pullQuote
 
-	// handle go quotes first
-	for _, pq := range pqs {
-		if pq.goPath != "" {
-			buf = append(buf, pq)
-		}
-	}
-
-	if len(buf) > 0 {
-		expanded, err := expandGoQuotes(ctx, buf)
-		if err != nil {
-			return nil, err
-		}
-		for j, cur := 0, 0; j < len(pqs) && cur < len(buf); j++ {
-			if pqs[j] == buf[cur] {
-				results[j] = expanded[cur]
-				cur++
+	for _, strategy := range []struct {
+		quoteType string
+		expander  func(context.Context, []*pullQuote) ([]*expanded, error)
+	}{
+		{"go", expandGoQuotes},
+		{"json", expandJSONQuotes},
+	} {
+		for i, pq := range pqs {
+			if results[i] != nil {
+				continue
+			}
+			if pq.quoteType == strategy.quoteType {
+				buf = append(buf, pq)
 			}
 		}
-		buf = buf[:0]
+
+		if len(buf) > 0 {
+			expanded, err := strategy.expander(ctx, buf)
+			if err != nil {
+				return nil, err
+			}
+			for j, cur := 0, 0; j < len(pqs) && cur < len(buf); j++ {
+				if pqs[j] == buf[cur] {
+					results[j] = expanded[cur]
+					cur++
+				}
+			}
+			buf = buf[:0]
+		}
 	}
 
 	for i, pq := range pqs {
@@ -697,7 +709,7 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error
 			}
 		}
 
-		found, err := expandSrcPullQuotes(buf)
+		found, err := expandSrcPullQuotes(ctx, buf)
 		if err != nil {
 			return nil, err
 		}
@@ -715,7 +727,7 @@ func expandPullQuotes(ctx context.Context, pqs []*pullQuote) ([]*expanded, error
 	return results, nil
 }
 
-func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
+func expandSrcPullQuotes(_ context.Context, pqs []*pullQuote) ([]*expanded, error) {
 	f, err := os.Open(pqs[0].src)
 	if err != nil {
 		return nil, err
@@ -786,12 +798,16 @@ func expandSrcPullQuotes(pqs []*pullQuote) ([]*expanded, error) {
 }
 
 const (
+	// keyNoReformat disables realigning go tabs for the snippet
+	keyNoReformat = "noreformat"
+
 	// keyGoPath sets the path to a go expression or statement to print; can also be specified via goquote tag
 	keyGoPath = "gopath"
-	// keyNoRealign disables realigning go tabs for the snippet
-	keyNoRealign = "norealign"
 	// keyIncludeGroup includes the whole group declaration, not just the single named statement
 	keyIncludeGroup = "includegroup"
+
+	// keyJSONPath sets the path to a JSON object to print; can also be specified via jsonquote tag
+	keyJSONPath = "jsonpath"
 
 	// keySrc specifies the file from which to take a pullquote
 	keySrc = "src"
@@ -819,7 +835,8 @@ const (
 
 var (
 	keysCommonOptional    = [...]string{keyFmt, keyLang}
-	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
+	keysGoQuoteValid      = [...]string{keyGoPath, keyNoReformat, keyIncludeGroup}
+	keysJSONQuoteValid    = [...]string{keyJSONPath}
 	keysPullQuoteOptional = [...]string{keyEndCount}
 	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
 	validFmts             = map[string]bool{
@@ -831,29 +848,37 @@ var (
 )
 
 type pullQuote struct {
+	originalTag, quoteType string
+
 	src        string
 	start, end *regexp.Regexp
 	endCount   int
 	fmt, lang  string
 
-	goPath       string
-	goPrintFlags goPrintFlag
+	objPath, jsonPath string
+
+	flags uint
 
 	startIdx, endIdx int
-
-	tagType string
 }
 
 // String returns a representation of the PQ for debugging; it is _not_ a valid serialization.
 func (pq *pullQuote) String() string {
 	var b strings.Builder
-	_, _ = fmt.Fprintf(&b, "<!-- %vquote", pq.tagType)
+	_, _ = fmt.Fprintf(&b, "<!-- %vquote", pq.originalTag)
 
-	if pq.goPath != "" {
-		if pq.tagType == "go" {
-			_, _ = fmt.Fprintf(&b, " %q", pq.goPath)
+	switch pq.quoteType {
+	case "go":
+		if pq.originalTag == "go" {
+			_, _ = fmt.Fprintf(&b, " %q", pq.objPath)
 		} else {
-			_, _ = fmt.Fprintf(&b, " gopath=%q", pq.goPath)
+			_, _ = fmt.Fprintf(&b, " gopath=%q", pq.objPath)
+		}
+	case "json":
+		if pq.originalTag == "json" {
+			_, _ = fmt.Fprintf(&b, " %q", pq.jsonPath)
+		} else {
+			_, _ = fmt.Fprintf(&b, " jsonpath=%q", pq.jsonPath)
 		}
 	}
 
@@ -869,8 +894,8 @@ func (pq *pullQuote) String() string {
 		{keyEndCount, pq.endCount},
 		{keyFmt, pq.fmt},
 		{keyLang, pq.lang},
-		{keyIncludeGroup, pq.goPrintFlags&includeGroup != 0},
-		{keyNoRealign, pq.goPrintFlags&noRealignTabs != 0},
+		{keyIncludeGroup, pq.flags&includeGroup != 0},
+		{keyNoReformat, pq.flags&noRealignTabs != 0},
 	} {
 		switch v := t.val.(type) {
 		case bool:
@@ -900,10 +925,8 @@ func (pq *pullQuote) String() string {
 	return b.String()
 }
 
-type goPrintFlag uint
-
 const (
-	_ goPrintFlag = 1 << iota
+	_ = 1 << iota
 	noRealignTabs
 	includeGroup
 )
@@ -914,14 +937,17 @@ type scanner interface {
 	Err() error
 }
 
-func setOptions(pq *pullQuote, toks scanner) (map[string]struct{}, error) {
+func setOptions(pq *pullQuote, toks scanner, tagType string) (map[string]struct{}, error) {
 	b := builder{pq: pq, seen: make(map[string]struct{})}
 
 	// our expressions require maximum three "tokens"
 	window := make([]string, 0, 3)
 
-	if pq.tagType == "go" { // goquote tagtype is equivalent to an initial `gopath=`
+	switch tagType {
+	case "go":
 		window = append(window, keyGoPath, "=")
+	case "json":
+		window = append(window, keyJSONPath, "=")
 	}
 
 	for toks.Scan() && b.err == nil {
@@ -960,16 +986,33 @@ func validate(pq *pullQuote, seen map[string]struct{}) error {
 		delete(seen, s)
 	}
 
-	if pq.goPath != "" {
+	if pq.quoteType == "json" {
+		if pq.fmt == "" {
+			pq.fmt = fmtCodeFence
+			pq.lang = "json"
+		}
+
+		for _, s := range keysJSONQuoteValid {
+			delete(seen, s)
+		}
+
+		delete(seen, keyJSONPath)
+		if err := checkRemaining(seen); err != nil {
+			return fmt.Errorf("jsonquote: %w", err)
+		}
+		return nil
+	}
+
+	if pq.quoteType == "go" {
 		if pq.fmt == "" {
 			pq.fmt = fmtCodeFence
 			pq.lang = "go"
-			if strings.Contains(pq.goPath, "#Example") { // likely example test
+			if strings.Contains(pq.objPath, "#Example") { // likely example test
 				pq.fmt = fmtExample
 			}
 		}
 
-		for _, s := range keysGoquoteValid {
+		for _, s := range keysGoQuoteValid {
 			delete(seen, s)
 		}
 
@@ -1038,10 +1081,10 @@ func (b *builder) set(k, v string, vSet bool) {
 	switch k {
 	case keyIncludeGroup:
 		b.vSetTest(keyIncludeGroup, false, vSet)
-		b.pq.goPrintFlags |= includeGroup
-	case keyNoRealign:
-		b.vSetTest(keyNoRealign, false, vSet)
-		b.pq.goPrintFlags |= noRealignTabs
+		b.pq.flags |= includeGroup
+	case keyNoReformat:
+		b.vSetTest(keyNoReformat, false, vSet)
+		b.pq.flags |= noRealignTabs
 	case keySrc:
 		b.vSetTest(keySrc, true, vSet)
 		b.pq.src = v
@@ -1068,7 +1111,11 @@ func (b *builder) set(k, v string, vSet bool) {
 	case keyLang:
 		b.pq.lang = v
 	case keyGoPath:
-		b.pq.goPath = v
+		b.pq.objPath = v
+		b.pq.quoteType = "go"
+	case keyJSONPath:
+		b.pq.objPath = v
+		b.pq.quoteType = "json"
 	default:
 		if vSet {
 			b.err = fmt.Errorf("unknown key %q with value %q", k, v)

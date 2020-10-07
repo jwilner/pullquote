@@ -46,19 +46,39 @@ bye
 ~~~
 <!-- /pullquote -->
 
-That's it.
+It also does JSON!
+<!-- pullquote src=testdata/test_processFiles/jsonpath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
+~~~md
+hello
+<!-- jsonquote foo.json#/foo/0/1/bar -->
+```json
+[
+  {
+    "beep": "boop",
+    "boop": "beep"
+  }
+]
+```
+<!-- /jsonquote -->
+bye
+~~~
+<!-- /pullquote -->
 
 ## Options:
 
 <!-- goquote .#keySrc includegroup -->
 ```go
 const (
+	// keyNoReformat disables realigning go tabs for the snippet
+	keyNoReformat = "noreformat"
+
 	// keyGoPath sets the path to a go expression or statement to print; can also be specified via goquote tag
 	keyGoPath = "gopath"
-	// keyNoRealign disables realigning go tabs for the snippet
-	keyNoRealign = "norealign"
 	// keyIncludeGroup includes the whole group declaration, not just the single named statement
 	keyIncludeGroup = "includegroup"
+
+	// keyJSONPath sets the path to a JSON object to print; can also be specified via jsonquote tag
+	keyJSONPath = "jsonpath"
 
 	// keySrc specifies the file from which to take a pullquote
 	keySrc = "src"
@@ -89,7 +109,8 @@ const (
 ```go
 var (
 	keysCommonOptional    = [...]string{keyFmt, keyLang}
-	keysGoquoteValid      = [...]string{keyGoPath, keyNoRealign, keyIncludeGroup}
+	keysGoQuoteValid      = [...]string{keyGoPath, keyNoReformat, keyIncludeGroup}
+	keysJSONQuoteValid    = [...]string{keyJSONPath}
 	keysPullQuoteOptional = [...]string{keyEndCount}
 	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
 	validFmts             = map[string]bool{
