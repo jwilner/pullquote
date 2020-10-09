@@ -113,7 +113,7 @@ const (
 var (
 	keysCommonOptional    = [...]string{keyFmt, keyLang}
 	keysGoQuoteValid      = [...]string{keyGoPath, keyNoReformat, keyIncludeGroup}
-	keysJSONQuoteValid    = [...]string{keyJSONPath}
+	keysJSONQuoteValid    = [...]string{keyJSONPath, keyNoReformat}
 	keysPullQuoteOptional = [...]string{keyEndCount}
 	keysPullQuoteRequired = [...]string{keySrc, keyStart, keyEnd}
 	validFmts             = map[string]bool{
