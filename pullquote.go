@@ -242,7 +242,6 @@ func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-cha
 	}
 
 	ctx, cncl := context.WithCancel(ctx)
-	defer cncl()
 
 	var (
 		wg              sync.WaitGroup
@@ -310,6 +309,8 @@ func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-cha
 	}
 
 	go func() {
+		defer cncl()
+
 		seen := make(map[string]struct{})
 
 		submit := func(path string) {
