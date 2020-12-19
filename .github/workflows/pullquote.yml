@@ -17,8 +17,8 @@ jobs:
         uses: peter-evans/create-pull-request@v3
         with:
           token: ${{ secrets.PULLQUOTE_TOKEN }}
-          title: 'update pullquotes'
-          branch: auto-pullquote
+          title: 'Pullquotes in ${{ github.ref }}'
+          branch: pullquote/${{ github.ref }}
           body: |
             Update pullquotes in docs
             - Documentation changes created by [pullquote][1]
