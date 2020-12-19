@@ -1,4 +1,9 @@
-on: [push]
+on:
+  push:
+    branches:
+      - "**"
+    branches-ignore:
+      - "pullquote/**"  # this pr creates branches named like this
 name: pullquote
 jobs:
   pullquote:
