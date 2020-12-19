@@ -2,6 +2,6 @@ name: 'Pullquote'
 description: 'Update pullquotes in documentation'
 runs:
   using: 'docker'
-  image: 'gha/Dockerfile'
+  image: 'Dockerfile'
   args:
     - -walk
