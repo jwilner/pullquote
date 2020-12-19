@@ -1,6 +1,6 @@
 on:
   push:
-    branches:
+    tags-ignore:
       - "**"
     branches-ignore:
       - "pullquote/**"  # this pr creates branches named like this
