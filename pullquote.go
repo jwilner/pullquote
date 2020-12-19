@@ -219,12 +219,35 @@ func processFiles(ctx context.Context, checkMode bool, fns <-chan string) error 
 		return errCheckMode
 	}
 	for _, m := range moves {
-		if err := os.Rename(m[0], m[1]); err != nil {
-			return fmt.Errorf("os.Rename(%v, %v): %w", m[0], m[1], err)
+		if err := overwrite(m[0], m[1]); err != nil {
+			return fmt.Errorf("overwrite(%v, %v): %w", m[0], m[1], err)
 		}
 	}
 	logger.Printf(`msg="processing complete" files_updated=%d`, len(moves))
 	return nil
+}
+
+// we use overwrite to avoid `invalid cross-device link` errors across volumes with os.Rename while also retaining file
+// attributes
+func overwrite(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = in.Close()
+	}()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = out.Close()
+	}()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func listFiles(ctx context.Context, fns []string, r io.Reader, walk bool) (<-chan string, <-chan error) {
