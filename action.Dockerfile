@@ -4,10 +4,9 @@ WORKDIR /pullquote
 
 COPY . ./
 
-RUN go build ./...
+RUN CGO_ENABLED=0 go build ./...
 
-# we rely on the `go` binary being present
-FROM golang:1.15-alpine
+FROM alpine
 
 COPY --from=builder /pullquote/pullquote /usr/local/bin/pullquote
 COPY scripts/action-entrypoint.sh /usr/local/bin/entrypoint.sh
