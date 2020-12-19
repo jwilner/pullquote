@@ -87,6 +87,7 @@ const (
 	keySrc = "src"
 	// keyStart specifies a pattern for the line on which a pullquote begins
 	keyStart = "start"
+
 	// keyEnd specifies a pattern for the line on which a pullquote ends
 	keyEnd = "end"
 	// keyEndCount specifies the number of times the `end` pattern should match before ending the quote; default 1
