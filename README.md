@@ -7,6 +7,8 @@
 
 A simple documentation tool that keeps quotes or snippets in your docs up-to-date. Intended to be wired into CI so you never have to update your snippets again.
 
+Executable as either a binary or a GitHub Action.
+
 ## Example
 
 Given a piece of code to document like:
@@ -19,7 +21,7 @@ func fooBar() {
 ```
 <!-- /goquote -->
 
-- Insert a `pullquote` tag in your doc:
+- Insert a `pullquote` comment in your doc (markdown ignores html-style comments):
 <!-- pullquote src=testdata/test_processFiles/gopath/README.md start=hello end=bye fmt=codefence lang=md -->
 ```md
 hello
@@ -49,6 +51,8 @@ bye
 ~~~
 <!-- /pullquote -->
 
+`pullquote` understands all `go list` style paths and can pull in source code from anywhere, including third-party projects.
+
 It also does JSON!
 <!-- pullquote src=testdata/test_processFiles/jsonpath/README.expected.md start=hello end=bye fmt=codefence lang=md -->
 ~~~md
@@ -66,6 +70,23 @@ hello
 bye
 ~~~
 <!-- /pullquote -->
+
+## Usage
+
+### Command line
+
+`pullquote` supports two flags:
+
+- `-walk` discovers all `*.md` files itself, rather than accepting over the CLI.
+- `-check` will error if any files are not up-to-date, leaving the filesystem unmodified.
+
+Specific files can be passed to `pullquote` either as args or over `stdin` (convenient for e.g. piping from `find`).
+
+### GitHub Action
+
+`pullquote` comes pre-packaged as a GitHub Action. In this mode, it uses `-walk` by default.
+
+It can be paired with [peter-evans/create-pull-request](https://github.com/peter-evans/create-pull-request) to create PRs whenever snippets have fallen out of date. See [.github/workflows/pullquote.yaml](.github/workflows/pullquote.yaml) for an example.
 
 ## Options:
 
